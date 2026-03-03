@@ -28,6 +28,9 @@ import {
   updateCloudSetting,
   updateSettings,
   getInferenceCompute,
+  getCredentialStatus,
+  setCredential,
+  APP_AUTH_PROVIDER,
 } from "@/api";
 
 function AnimatedDots() {
@@ -48,6 +51,11 @@ export default function Settings() {
   const queryClient = useQueryClient();
   const [showSaved, setShowSaved] = useState(false);
   const [restartMessage, setRestartMessage] = useState(false);
+  const [credentialInputs, setCredentialInputs] = useState({
+    openrouter: "",
+    kimi: "",
+    ollama_cloud: "",
+  });
   const {
     user,
     isAuthenticated,
@@ -82,6 +90,10 @@ export default function Settings() {
   const { data: inferenceComputeResponse } = useQuery({
     queryKey: ["inferenceCompute"],
     queryFn: getInferenceCompute,
+  });
+  const { data: credentialStatus } = useQuery({
+    queryKey: ["credentialStatus"],
+    queryFn: getCredentialStatus,
   });
 
   const defaultContextLength = inferenceComputeResponse?.defaultContextLength;
@@ -134,6 +146,21 @@ export default function Settings() {
       queryClient.invalidateQueries({ queryKey: ["models"] });
       queryClient.invalidateQueries({ queryKey: ["cloudStatus"] });
 
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 1500);
+    },
+  });
+
+  const setCredentialMutation = useMutation({
+    mutationFn: ({
+      provider,
+      secret,
+    }: {
+      provider: "openrouter" | "kimi" | "ollama_cloud";
+      secret: string;
+    }) => setCredential(provider, secret),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["credentialStatus"] });
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 1500);
     },
@@ -214,9 +241,20 @@ export default function Settings() {
         Agent: false,
         Tools: false,
         ContextLength: 0,
+        SidebarOpen: true,
+        BrowserControlEnabled: true,
       });
       updateSettingsMutation.mutate(defaultSettings);
     }
+  };
+
+  const handleSaveCredential = async (
+    provider: "openrouter" | "kimi" | "ollama_cloud",
+  ) => {
+    const secret = credentialInputs[provider].trim();
+    if (!secret) return;
+    await setCredentialMutation.mutateAsync({ provider, secret });
+    setCredentialInputs((prev) => ({ ...prev, [provider]: "" }));
   };
 
   const cloudOverriddenByEnv =
@@ -224,10 +262,10 @@ export default function Settings() {
   const cloudToggleDisabled =
     cloudStatusLoading || updateCloudMutation.isPending || cloudOverriddenByEnv;
 
-  const handleConnectOllamaAccount = async () => {
+  const handleConnectAccount = async () => {
     setConnectionError(null);
 
-    // If user is already authenticated, no need to connect
+    // If user is already authenticated, no need to connect.
     if (isAuthenticated) {
       return;
     }
@@ -238,22 +276,24 @@ export default function Settings() {
         const { data: connectUrl } = await fetchConnectUrl();
         if (connectUrl) {
           window.open(connectUrl, "_blank");
-          setIsAwaitingConnection(true);
-          // Start polling every 5 seconds
-          const interval = setInterval(() => {
-            refreshUser();
-          }, 5000);
-          setPollingInterval(interval);
+          if (APP_AUTH_PROVIDER === "ollama") {
+            setIsAwaitingConnection(true);
+            // Start polling every 5 seconds
+            const interval = setInterval(() => {
+              refreshUser();
+            }, 5000);
+            setPollingInterval(interval);
+          }
         } else {
           setConnectionError("Failed to get connect URL");
         }
       }
     } catch (error) {
-      console.error("Error connecting to Ollama account:", error);
+      console.error("Error connecting account:", error);
       setConnectionError(
         error instanceof Error
           ? error.message
-          : "Failed to connect to Ollama account",
+          : "Failed to connect account",
       );
       setIsAwaitingConnection(false);
     }
@@ -328,45 +368,51 @@ export default function Settings() {
                       <Description className="text-sm text-neutral-500 dark:text-neutral-400">
                         {user?.email}
                       </Description>
-                      <div className="flex items-center space-x-2 mt-2">
-                        {user?.plan === "free" && (
+                      {APP_AUTH_PROVIDER === "ollama" ? (
+                        <div className="flex items-center space-x-2 mt-2">
+                          {user?.plan === "free" && (
+                            <Button
+                              type="button"
+                              color="dark"
+                              className="px-3 py-2 text-sm font-medium bg-black/90 backdrop-blur-sm text-white rounded-lg border border-white/10 shadow-2xl transition-all duration-300 ease-out relative overflow-hidden group"
+                              onClick={() =>
+                                window.open(
+                                  "https://ollama.com/upgrade",
+                                  "_blank",
+                                )
+                              }
+                            >
+                              <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/20 via-purple-500/20 to-green-500/20 opacity-60 group-hover:opacity-80 transition-opacity duration-300"></div>
+                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000 ease-out"></div>
+                              <span className="relative z-10 flex items-center space-x-2">
+                                <span>Upgrade</span>
+                              </span>
+                            </Button>
+                          )}
                           <Button
                             type="button"
-                            color="dark"
-                            className="px-3 py-2 text-sm font-medium bg-black/90 backdrop-blur-sm text-white rounded-lg border border-white/10 shadow-2xl transition-all duration-300 ease-out relative overflow-hidden group"
+                            color="white"
+                            className="px-3 py-2 text-sm"
                             onClick={() =>
-                              window.open(
-                                "https://ollama.com/upgrade",
-                                "_blank",
-                              )
+                              window.open("https://ollama.com/settings", "_blank")
                             }
                           >
-                            <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/20 via-purple-500/20 to-green-500/20 opacity-60 group-hover:opacity-80 transition-opacity duration-300"></div>
-                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000 ease-out"></div>
-                            <span className="relative z-10 flex items-center space-x-2">
-                              <span>Upgrade</span>
-                            </span>
+                            Manage
                           </Button>
-                        )}
-                        <Button
-                          type="button"
-                          color="white"
-                          className="px-3 py-2 text-sm"
-                          onClick={() =>
-                            window.open("https://ollama.com/settings", "_blank")
-                          }
-                        >
-                          Manage
-                        </Button>
-                        <Button
-                          type="button"
-                          color="zinc"
-                          className="px-3 py-2 text-sm"
-                          onClick={() => disconnectUser()}
-                        >
-                          Sign out
-                        </Button>
-                      </div>
+                          <Button
+                            type="button"
+                            color="zinc"
+                            className="px-3 py-2 text-sm"
+                            onClick={() => disconnectUser()}
+                          >
+                            Sign out
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="mt-2">
+                          <Badge color="green">Signed in with Anorha</Badge>
+                        </div>
+                      )}
                     </div>
                     {user?.avatarurl && (
                       <img
@@ -383,13 +429,21 @@ export default function Settings() {
                 ) : (
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label>Ollama account</Label>
-                      <Description>Not connected</Description>
+                      <Label>
+                        {APP_AUTH_PROVIDER === "clerk"
+                          ? "Anorha account (Clerk)"
+                          : "Ollama account"}
+                      </Label>
+                      <Description>
+                        {APP_AUTH_PROVIDER === "clerk"
+                          ? "Sign in to Anorha to access app-level features."
+                          : "Not connected"}
+                      </Description>
                     </div>
                     <Button
                       type="button"
                       color="white"
-                      onClick={handleConnectOllamaAccount}
+                      onClick={handleConnectAccount}
                       disabled={isRefreshing || isAwaitingConnection}
                     >
                       {isRefreshing || isAwaitingConnection ? (
@@ -558,6 +612,77 @@ export default function Settings() {
                   </div>
                 </div>
               </Field>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
+            <div className="space-y-4 p-4">
+              <Field>
+                <div>
+                  <Label>Provider credentials</Label>
+                  <Description>
+                    Configure API keys for OpenRouter, Kimi, and Ollama Cloud.
+                    These keys control cloud model access in dev.
+                  </Description>
+                </div>
+              </Field>
+
+              {[
+                {
+                  key: "openrouter" as const,
+                  label: "OpenRouter API key",
+                },
+                {
+                  key: "kimi" as const,
+                  label: "Kimi API key",
+                },
+                {
+                  key: "ollama_cloud" as const,
+                  label: "Ollama Cloud API key",
+                },
+              ].map((provider) => {
+                const status = credentialStatus?.[provider.key];
+                const hasValue = status?.available === true;
+                return (
+                  <Field key={provider.key}>
+                    <div className="flex items-center gap-3">
+                      <div className="w-full">
+                        <Label>{provider.label}</Label>
+                        <Description>
+                          {hasValue
+                            ? `Configured (${status?.source || "unknown"})`
+                            : "Not configured"}
+                        </Description>
+                        <div className="mt-2 flex items-center gap-2">
+                          <Input
+                            type="password"
+                            value={credentialInputs[provider.key]}
+                            onChange={(e) =>
+                              setCredentialInputs((prev) => ({
+                                ...prev,
+                                [provider.key]: e.target.value,
+                              }))
+                            }
+                            placeholder="Enter key"
+                          />
+                          <Button
+                            type="button"
+                            color="white"
+                            className="px-3"
+                            disabled={
+                              setCredentialMutation.isPending ||
+                              !credentialInputs[provider.key].trim()
+                            }
+                            onClick={() => handleSaveCredential(provider.key)}
+                          >
+                            Save
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </Field>
+                );
+              })}
             </div>
           </div>
 

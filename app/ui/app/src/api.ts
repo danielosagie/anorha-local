@@ -16,6 +16,20 @@ import { ollamaClient as ollama } from "./lib/ollama-client";
 import type { ModelResponse } from "ollama/browser";
 import { API_BASE, OLLAMA_DOT_COM } from "./lib/config";
 
+export type AppAuthProvider = "clerk" | "ollama";
+export const APP_AUTH_PROVIDER: AppAuthProvider =
+  ((import.meta as any)?.env?.VITE_ANORHA_AUTH_PROVIDER || "clerk")
+    .toString()
+    .trim()
+    .toLowerCase() === "ollama"
+    ? "ollama"
+    : "clerk";
+export const APP_AUTH_SIGNIN_URL: string = (
+  (import.meta as any)?.env?.VITE_ANORHA_AUTH_SIGNIN_URL || ""
+)
+  .toString()
+  .trim();
+
 // Extend Model class with utility methods
 declare module "@/gotypes" {
   interface Model {
@@ -71,6 +85,10 @@ export async function fetchUser(): Promise<User | null> {
 }
 
 export async function fetchConnectUrl(): Promise<string> {
+  if (APP_AUTH_PROVIDER === "clerk" && APP_AUTH_SIGNIN_URL) {
+    return APP_AUTH_SIGNIN_URL;
+  }
+
   const response = await fetch(`${API_BASE}/api/me`, {
     method: "POST",
     headers: {
@@ -89,6 +107,10 @@ export async function fetchConnectUrl(): Promise<string> {
 }
 
 export async function disconnectUser(): Promise<void> {
+  if (APP_AUTH_PROVIDER === "clerk") {
+    return;
+  }
+
   const response = await fetch(`${API_BASE}/api/signout`, {
     method: "POST",
     headers: {
@@ -142,6 +164,23 @@ export async function getModels(query?: string): Promise<Model[]> {
         });
       });
 
+    // Add OpenRouter models (best effort), namespaced as openrouter/<model-id>.
+    try {
+      const openRouterModels = await getProviderModels("openrouter");
+      for (const modelId of openRouterModels) {
+        const prefixed = `openrouter/${modelId}`;
+        if (!models.some((m) => m.model === prefixed)) {
+          models.push(
+            new Model({
+              model: prefixed,
+            }),
+          );
+        }
+      }
+    } catch {
+      // Ignore provider discovery failures; local model listing still works.
+    }
+
     // Filter by query if provided
     if (query) {
       const normalizedQuery = query.toLowerCase().trim();
@@ -159,7 +198,7 @@ export async function getModels(query?: string): Promise<Model[]> {
       }
 
       // Add query if it's in the registry and not already in the list
-      if (!exactMatch) {
+      if (!exactMatch && !normalizedQuery.startsWith("openrouter/")) {
         const result = await getModelUpstreamInfo(new Model({ model: query }));
         const existsUpstream = !!result.digest && !result.error;
         if (existsUpstream) {
@@ -173,6 +212,44 @@ export async function getModels(query?: string): Promise<Model[]> {
     return models;
   } catch (err) {
     throw new Error(`Failed to fetch models: ${err}`);
+  }
+}
+
+export async function getProviderModels(
+  route: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter",
+): Promise<string[]> {
+  const response = await fetch(
+    `${API_BASE}/api/v1/providers/models?route=${encodeURIComponent(route)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch provider models: ${response.status}`);
+  }
+  const data = await response.json();
+  return Array.isArray(data.models) ? data.models : [];
+}
+
+export async function getCredentialStatus(): Promise<
+  Record<string, { available: boolean; source: string }>
+> {
+  const response = await fetch(`${API_BASE}/api/v1/credentials/status`);
+  if (!response.ok) {
+    throw new Error("Failed to fetch credential status");
+  }
+  const data = await response.json();
+  return data.status || {};
+}
+
+export async function setCredential(
+  provider: "openrouter" | "kimi" | "ollama_cloud",
+  secret: string,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/v1/credentials`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, secret }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to set credential");
   }
 }
 
@@ -196,6 +273,212 @@ export async function getModelCapabilities(
 
 export type ChatEventUnion = ChatEvent | DownloadEvent | ErrorEvent;
 
+export interface RuntimeRequestOptions {
+  browserControlEnabled?: boolean;
+  runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+  runtimeCDPURL?: string;
+  runtimeTabIndex?: number;
+  runtimeTabMatch?: string;
+  runtimeTabPolicy?: "pinned" | "ask" | "active";
+  runtimeMaxSteps?: number;
+  providerRoute?: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter";
+  providerModel?: string;
+}
+
+const RUNTIME_API_BASE =
+  (import.meta as any)?.env?.VITE_ANORHA_RUNTIME_API_BASE || "http://127.0.0.1:7318";
+
+export type WorkflowOperation = "create" | "read" | "update" | "delete";
+export type WorkflowMode = "async" | "sync";
+export type WorkflowSiteStatus = "active" | "draft" | "disabled";
+export type WorkflowToolStatus = "active" | "draft" | "archived";
+export type WorkflowSessionType = "create" | "verify" | "update";
+export type WorkflowRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "completed_with_errors"
+  | "failed"
+  | "canceled";
+export type WorkflowItemStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+export type WorkflowStageStatus = "pending" | "running" | "success" | "failed" | "skipped";
+
+export interface WorkflowItemCommand {
+  itemId?: string;
+  externalItemId?: string;
+  operation?: WorkflowOperation;
+  prompt?: string;
+  input?: Record<string, unknown>;
+}
+
+export interface WorkflowRunRequestPayload {
+  workflowKey: string;
+  operation: WorkflowOperation;
+  mode?: WorkflowMode;
+  items: WorkflowItemCommand[];
+  runtime?: RuntimeRequestOptions & {
+    viewportProfile?: "desktop" | "tablet" | "mobile";
+    headless?: boolean;
+  };
+  selection?: {
+    itemIds?: string[];
+    externalItemIds?: string[];
+    indexRange?: { start: number; end: number };
+  };
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkflowCatalogSite {
+  id: string;
+  key: string;
+  name: string;
+  description?: string;
+  status: WorkflowSiteStatus;
+  domains: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowCatalogTool {
+  id: string;
+  siteId: string;
+  key: string;
+  name: string;
+  description?: string;
+  group: string;
+  status: WorkflowToolStatus;
+  workflowKey: string;
+  operation: WorkflowOperation;
+  stagePlan: Array<"navigate" | "fill_data" | "confirm" | "complete" | "verify">;
+  requiredFields: string[];
+  allowedFields: string[];
+  promptTemplate: string;
+  selectorHints?: Record<string, unknown>;
+  presetCode?: string;
+  version: number;
+  verifiedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowCatalogVerifyResult {
+  tool: WorkflowCatalogTool;
+  dryRun: {
+    valid: boolean;
+    missingFields: string[];
+    notes: string[];
+  };
+  sampleRun?: {
+    runId: string;
+    status: WorkflowRunStatus;
+  };
+}
+
+export interface WorkflowSessionRequestPayload {
+  workflowKey: string;
+  operation: WorkflowOperation;
+  mode?: WorkflowMode;
+  sessionType?: WorkflowSessionType;
+  siteId?: string;
+  toolIds?: string[];
+  items: WorkflowItemCommand[];
+  runtime?: WorkflowRunRequestPayload["runtime"];
+  selection?: WorkflowRunRequestPayload["selection"];
+  metadata?: Record<string, unknown>;
+}
+
+export interface WorkflowRunView {
+  id: string;
+  workflowKey: string;
+  operation: WorkflowOperation;
+  mode: WorkflowMode;
+  status: WorkflowRunStatus;
+  createdAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  metadata: Record<string, unknown>;
+  runtime: Record<string, unknown>;
+  totals: {
+    total: number;
+    pending: number;
+    running: number;
+    succeeded: number;
+    failed: number;
+    canceled: number;
+  };
+  itemIds: string[];
+}
+
+export interface WorkflowRunItemView {
+  id: string;
+  index: number;
+  externalItemId: string;
+  operation: WorkflowOperation;
+  status: WorkflowItemStatus;
+  attempts: number;
+  currentStage: "navigate" | "fill_data" | "confirm" | "complete" | "verify" | "";
+  missingFields: string[];
+  error: string;
+  summary: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+}
+
+export type WorkflowRunEvent =
+  | {
+      eventName: "workflow_stage";
+      runId: string;
+      itemId: string;
+      stage: "navigate" | "fill_data" | "confirm" | "complete" | "verify";
+      status: WorkflowStageStatus;
+      attempt: number;
+      durationMs?: number;
+      evidence?: string;
+      error?: string;
+      missingFields?: string[];
+    }
+  | {
+      eventName: "workflow_item_result";
+      runId: string;
+      itemId: string;
+      status: WorkflowItemStatus;
+      attempt: number;
+      summary?: string;
+      error?: string;
+      missingFields?: string[];
+      startedAt?: string;
+      endedAt?: string;
+      durationMs?: number;
+    }
+  | {
+      eventName: "workflow_run";
+      runId: string;
+      status: WorkflowRunStatus;
+      summary?: string;
+      completed?: number;
+      total?: number;
+      failed?: number;
+      canceled?: number;
+    }
+  | {
+      eventName: "error";
+      error: string;
+    }
+  | {
+      eventName: "tool_result" | "tool_call" | "thinking";
+      content?: string;
+      toolName?: string;
+      toolResultData?: unknown;
+      thinking?: string;
+    };
+
 export async function* sendMessage(
   chatId: string,
   message: string,
@@ -207,6 +490,7 @@ export async function* sendMessage(
   fileTools?: boolean,
   forceUpdate?: boolean,
   think?: boolean | string,
+  runtimeOptions?: RuntimeRequestOptions,
 ): AsyncGenerator<ChatEventUnion> {
   // Convert Uint8Array to base64 for JSON serialization
   const serializedAttachments = attachments?.map((att) => ({
@@ -237,6 +521,33 @@ export async function* sendMessage(
         file_tools: fileTools ?? false,
         ...(forceUpdate !== undefined ? { forceUpdate } : {}),
         ...(shouldSendThink ? { think } : {}),
+        ...(runtimeOptions?.browserControlEnabled !== undefined
+          ? { browserControlEnabled: runtimeOptions.browserControlEnabled }
+          : {}),
+        ...(runtimeOptions?.runtimeBackend
+          ? { runtimeBackend: runtimeOptions.runtimeBackend }
+          : {}),
+        ...(runtimeOptions?.runtimeCDPURL
+          ? { runtimeCDPURL: runtimeOptions.runtimeCDPURL }
+          : {}),
+        ...(runtimeOptions?.runtimeTabIndex !== undefined
+          ? { runtimeTabIndex: runtimeOptions.runtimeTabIndex }
+          : {}),
+        ...(runtimeOptions?.runtimeTabMatch
+          ? { runtimeTabMatch: runtimeOptions.runtimeTabMatch }
+          : {}),
+        ...(runtimeOptions?.runtimeTabPolicy
+          ? { runtimeTabPolicy: runtimeOptions.runtimeTabPolicy }
+          : {}),
+        ...(runtimeOptions?.runtimeMaxSteps !== undefined
+          ? { runtimeMaxSteps: runtimeOptions.runtimeMaxSteps }
+          : {}),
+        ...(runtimeOptions?.providerRoute
+          ? { providerRoute: runtimeOptions.providerRoute }
+          : {}),
+        ...(runtimeOptions?.providerModel
+          ? { providerModel: runtimeOptions.providerModel }
+          : {}),
       }),
     ),
     signal,
@@ -253,6 +564,527 @@ export async function* sendMessage(
       default:
         yield new ChatEvent(event);
         break;
+    }
+  }
+}
+
+function runtimeHeaders(token?: string): Record<string, string> {
+  const resolvedToken = token || getWorkflowAuthToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (resolvedToken && resolvedToken.trim()) {
+    headers.Authorization = `Bearer ${resolvedToken.trim()}`;
+  }
+  return headers;
+}
+
+export function getWorkflowAuthToken(): string {
+  try {
+    const fromStorage = localStorage.getItem("anorha.workflow.token") || "";
+    if (fromStorage.trim()) return fromStorage.trim();
+  } catch {
+    // ignore localStorage access errors
+  }
+  const fromEnv = ((import.meta as any)?.env?.VITE_ANORHA_WORKFLOW_TOKEN || "")
+    .toString()
+    .trim();
+  return fromEnv;
+}
+
+export async function createWorkflowRun(
+  payload: WorkflowRunRequestPayload,
+  token?: string,
+): Promise<{
+  success: boolean;
+  mode: WorkflowMode;
+  completed?: boolean;
+  run: WorkflowRunView;
+  items?: WorkflowRunItemView[];
+  itemIds?: string[];
+}> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-runs`, {
+    method: "POST",
+    headers: runtimeHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to create workflow run (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function listWorkflowCatalogSites(token?: string): Promise<{
+  success: boolean;
+  sites: WorkflowCatalogSite[];
+}> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-catalog/sites`, {
+    method: "GET",
+    headers: runtimeHeaders(token),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow catalog sites (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function createWorkflowCatalogSite(
+  payload: {
+    key: string;
+    name: string;
+    description?: string;
+    status?: WorkflowSiteStatus;
+    domains?: string[];
+  },
+  token?: string,
+): Promise<{ success: boolean; site: WorkflowCatalogSite }> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-catalog/sites`, {
+    method: "POST",
+    headers: runtimeHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to create workflow site (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function updateWorkflowCatalogSite(
+  siteId: string,
+  payload: {
+    name?: string;
+    description?: string;
+    status?: WorkflowSiteStatus;
+    domains?: string[];
+  },
+  token?: string,
+): Promise<{ success: boolean; site: WorkflowCatalogSite }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-catalog/sites/${encodeURIComponent(siteId)}`,
+    {
+      method: "PATCH",
+      headers: runtimeHeaders(token),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to update workflow site (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function listWorkflowCatalogSiteTools(
+  siteId: string,
+  token?: string,
+): Promise<{ success: boolean; tools: WorkflowCatalogTool[] }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-catalog/sites/${encodeURIComponent(siteId)}/tools`,
+    {
+      method: "GET",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow tools (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function createWorkflowCatalogTool(
+  payload: {
+    siteId: string;
+    key: string;
+    name: string;
+    description?: string;
+    group: string;
+    status?: WorkflowToolStatus;
+    workflowKey: string;
+    operation: WorkflowOperation;
+    stagePlan?: Array<"navigate" | "fill_data" | "confirm" | "complete" | "verify">;
+    requiredFields?: string[];
+    allowedFields?: string[];
+    promptTemplate: string;
+    selectorHints?: Record<string, unknown>;
+    presetCode?: string;
+  },
+  token?: string,
+): Promise<{ success: boolean; tool: WorkflowCatalogTool }> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-catalog/tools`, {
+    method: "POST",
+    headers: runtimeHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to create workflow tool (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function updateWorkflowCatalogTool(
+  toolId: string,
+  payload: Partial<{
+    name: string;
+    description: string;
+    group: string;
+    status: WorkflowToolStatus;
+    operation: WorkflowOperation;
+    stagePlan: Array<"navigate" | "fill_data" | "confirm" | "complete" | "verify">;
+    requiredFields: string[];
+    allowedFields: string[];
+    promptTemplate: string;
+    selectorHints: Record<string, unknown>;
+    presetCode: string;
+  }>,
+  token?: string,
+): Promise<{ success: boolean; tool: WorkflowCatalogTool }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-catalog/tools/${encodeURIComponent(toolId)}`,
+    {
+      method: "PATCH",
+      headers: runtimeHeaders(token),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to update workflow tool (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function deleteWorkflowCatalogTool(
+  toolId: string,
+  token?: string,
+): Promise<{ success: boolean }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-catalog/tools/${encodeURIComponent(toolId)}`,
+    {
+      method: "DELETE",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to delete workflow tool (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function verifyWorkflowCatalogTool(
+  toolId: string,
+  payload: {
+    dryRun?: boolean;
+    sampleInput?: Record<string, unknown>;
+    runtime?: WorkflowRunRequestPayload["runtime"];
+  },
+  token?: string,
+): Promise<{ success: boolean; result: WorkflowCatalogVerifyResult }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-catalog/tools/${encodeURIComponent(toolId)}/verify`,
+    {
+      method: "POST",
+      headers: runtimeHeaders(token),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to verify workflow tool (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function createWorkflowSession(
+  payload: WorkflowSessionRequestPayload,
+  token?: string,
+): Promise<{
+  success: boolean;
+  mode: WorkflowMode;
+  completed?: boolean;
+  session: WorkflowRunView;
+  items?: WorkflowRunItemView[];
+  itemIds?: string[];
+}> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-sessions`, {
+    method: "POST",
+    headers: runtimeHeaders(token),
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to create workflow session (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function getWorkflowSession(
+  sessionId: string,
+  token?: string,
+): Promise<{ success: boolean; session: WorkflowRunView }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "GET",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow session (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function listWorkflowSessionItems(
+  sessionId: string,
+  token?: string,
+): Promise<{ success: boolean; items: WorkflowRunItemView[] }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-sessions/${encodeURIComponent(sessionId)}/items`,
+    {
+      method: "GET",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow session items (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function cancelWorkflowSession(
+  sessionId: string,
+  token?: string,
+): Promise<{ success: boolean; session: WorkflowRunView }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-sessions/${encodeURIComponent(sessionId)}/cancel`,
+    {
+      method: "POST",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to cancel workflow session (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function retryWorkflowSessionItems(
+  sessionId: string,
+  itemIds?: string[],
+  token?: string,
+): Promise<{ success: boolean; session: WorkflowRunView; items: WorkflowRunItemView[] }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-sessions/${encodeURIComponent(sessionId)}/retry`,
+    {
+      method: "POST",
+      headers: runtimeHeaders(token),
+      body: JSON.stringify({ itemIds: itemIds || [] }),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to retry workflow session items (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function* streamWorkflowSessionEvents(
+  sessionId: string,
+  token?: string,
+): AsyncGenerator<WorkflowRunEvent> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-sessions/${encodeURIComponent(sessionId)}/events`,
+    {
+      method: "GET",
+      headers: token && token.trim() ? { Authorization: `Bearer ${token.trim()}` } : runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to stream workflow session events (${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error("Workflow session event stream has no body");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let eventBreak = buffer.indexOf("\n\n");
+    while (eventBreak >= 0) {
+      const rawEvent = buffer.slice(0, eventBreak);
+      buffer = buffer.slice(eventBreak + 2);
+
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+      const payload = dataLines.join("\n").trim();
+      if (payload) {
+        try {
+          const parsed = JSON.parse(payload) as WorkflowRunEvent;
+          yield parsed;
+        } catch {
+          // Ignore malformed frames to keep stream alive.
+        }
+      }
+
+      eventBreak = buffer.indexOf("\n\n");
+    }
+  }
+}
+
+export async function getWorkflowRun(runId: string, token?: string): Promise<{
+  success: boolean;
+  run: WorkflowRunView;
+}> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-runs/${encodeURIComponent(runId)}`,
+    {
+      method: "GET",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow run (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function listWorkflowRunItems(
+  runId: string,
+  token?: string,
+): Promise<{ success: boolean; items: WorkflowRunItemView[] }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-runs/${encodeURIComponent(runId)}/items`,
+    {
+      method: "GET",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow run items (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function cancelWorkflowRun(
+  runId: string,
+  token?: string,
+): Promise<{ success: boolean; run: WorkflowRunView }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: "POST",
+      headers: runtimeHeaders(token),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to cancel workflow run (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function retryWorkflowRunItems(
+  runId: string,
+  itemIds?: string[],
+  token?: string,
+): Promise<{ success: boolean; run: WorkflowRunView; items: WorkflowRunItemView[] }> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-runs/${encodeURIComponent(runId)}/retry`,
+    {
+      method: "POST",
+      headers: runtimeHeaders(token),
+      body: JSON.stringify({ itemIds: itemIds || [] }),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to retry workflow run items (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function getWorkflowDailyMetrics(
+  token?: string,
+): Promise<{ success: boolean; metrics: Array<Record<string, unknown>> }> {
+  const response = await fetch(`${RUNTIME_API_BASE}/v1/workflow-metrics/daily`, {
+    method: "GET",
+    headers: runtimeHeaders(token),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to fetch workflow metrics (${response.status})`);
+  }
+  return await response.json();
+}
+
+export async function* streamWorkflowRunEvents(
+  runId: string,
+  token?: string,
+): AsyncGenerator<WorkflowRunEvent> {
+  const response = await fetch(
+    `${RUNTIME_API_BASE}/v1/workflow-runs/${encodeURIComponent(runId)}/events`,
+    {
+      method: "GET",
+      headers: token && token.trim() ? { Authorization: `Bearer ${token.trim()}` } : {},
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Failed to stream workflow events (${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error("Workflow event stream has no body");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let eventBreak = buffer.indexOf("\n\n");
+    while (eventBreak >= 0) {
+      const rawEvent = buffer.slice(0, eventBreak);
+      buffer = buffer.slice(eventBreak + 2);
+
+      const dataLines = rawEvent
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim());
+      const payload = dataLines.join("\n").trim();
+      if (payload) {
+        try {
+          const parsed = JSON.parse(payload) as WorkflowRunEvent;
+          yield parsed;
+        } catch {
+          // Ignore malformed frames to keep stream alive.
+        }
+      }
+
+      eventBreak = buffer.indexOf("\n\n");
     }
   }
 }

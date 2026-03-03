@@ -15,9 +15,10 @@ const DEBUG_SHIFT_CLICK_WINDOW_MS = 7000; // 7 seconds
 
 interface ChatSidebarProps {
   currentChatId?: string;
+  currentSection?: "chat" | "workflows";
 }
 
-export function ChatSidebar({ currentChatId }: ChatSidebarProps) {
+export function ChatSidebar({ currentChatId, currentSection = "chat" }: ChatSidebarProps) {
   const { data, isLoading, error } = useChats();
   const queryClient = useQueryClient();
   const renameMutation = useRenameChat();
@@ -259,8 +260,6 @@ export function ChatSidebar({ currentChatId }: ChatSidebarProps) {
     );
   }
 
-  const isWindows = navigator.platform.toLowerCase().includes("win");
-
   return (
     <nav className="flex flex-1 flex-col min-h-0 select-none">
       <header className="flex flex-col gap-0.5 px-4 pb-2">
@@ -283,16 +282,30 @@ export function ChatSidebar({ currentChatId }: ChatSidebarProps) {
           </svg>
           <span className="truncate">New Chat</span>
         </Link>
-        {isWindows && (
-          <Link
-            href="/settings"
-            className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:text-neutral-300`}
-            draggable={false}
+        <Link
+          href="/settings"
+          className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:text-neutral-300`}
+          draggable={false}
+        >
+          <CogIcon className="h-5 w-5 stroke-current" />
+          <span className="truncate">Settings</span>
+        </Link>
+        <Link
+          href="/workflows"
+          className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:text-neutral-100 ${
+            currentSection === "workflows" ? "bg-neutral-100 dark:bg-neutral-800" : ""
+          }`}
+          draggable={false}
+        >
+          <svg
+            className="h-5 w-5 fill-current"
+            viewBox="0 0 24 24"
+            xmlns="http://www.w3.org/2000/svg"
           >
-            <CogIcon className="h-5 w-5 stroke-current" />
-            <span className="truncate">Settings</span>
-          </Link>
-        )}
+            <path d="M5 3h14a2 2 0 0 1 2 2v4H3V5a2 2 0 0 1 2-2Zm-2 8h8v10H5a2 2 0 0 1-2-2v-8Zm10 0h8v8a2 2 0 0 1-2 2h-6V11Zm2 2v2h4v-2h-4Zm0 4v2h4v-2h-4ZM5 13v2h4v-2H5Zm0 4v2h4v-2H5Z" />
+          </svg>
+          <span className="truncate">Workflows</span>
+        </Link>
       </header>
       <div className="flex flex-1 flex-col px-4 py-1 overflow-y-auto overscroll-auto scrollbar-gutter">
         <div className="flex flex-col gap-3 pt-4">

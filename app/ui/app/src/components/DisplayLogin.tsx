@@ -2,6 +2,7 @@ import type { ErrorEvent } from "@/gotypes";
 import { Display, type DisplayAction } from "@/components/ui/display";
 import { useUser } from "@/hooks/useUser";
 import { useEffect, useState } from "react";
+import { APP_AUTH_PROVIDER } from "@/api";
 
 interface DisplayLoginProps {
   error: ErrorEvent | null;
@@ -51,7 +52,9 @@ export const DisplayLogin = ({
       const { data: connectUrl } = await fetchConnectUrl();
       if (connectUrl) {
         window.open(connectUrl, "_blank");
-        setIsAwaitingAuth(true);
+        if (APP_AUTH_PROVIDER !== "clerk") {
+          setIsAwaitingAuth(true);
+        }
       }
     } catch (error) {
       console.error("Error getting connect URL:", error);
@@ -59,13 +62,18 @@ export const DisplayLogin = ({
   };
 
   const action: DisplayAction = {
-    label: "Sign In",
+    label: APP_AUTH_PROVIDER === "clerk" ? "Sign In to Anorha" : "Sign In",
     onClick: handleSignIn,
   };
 
   return (
     <Display
-      message={message || "Cloud models require an Ollama account"}
+      message={
+        message ||
+        (APP_AUTH_PROVIDER === "clerk"
+          ? "Cloud models require an Anorha account"
+          : "Cloud models require an Ollama account")
+      }
       action={action}
       className={className}
       onDismiss={onDismiss}

@@ -323,6 +323,22 @@ export class ModelCapabilitiesResponse {
         this.capabilities = source["capabilities"];
     }
 }
+export class RecordingSegment {
+    segmentId: string;
+    threadId: string;
+    timestamp: number;
+    summary: string;
+    imageDataUrl?: string;
+
+    constructor(source: any = {}) {
+        if ('string' === typeof source) source = JSON.parse(source);
+        this.segmentId = source["segmentId"];
+        this.threadId = source["threadId"];
+        this.timestamp = source["timestamp"];
+        this.summary = source["summary"];
+        this.imageDataUrl = source["imageDataUrl"];
+    }
+}
 export class ChatEvent {
     eventName: "chat" | "thinking" | "assistant_with_tools" | "tool_call" | "tool" | "tool_result" | "done" | "chat_created";
     content?: string;
@@ -415,6 +431,13 @@ export class Settings {
     SelectedModel: string;
     SidebarOpen: boolean;
     AutoUpdateEnabled: boolean;
+    BrowserControlEnabled: boolean;
+    RuntimeBackend: string;
+    HeadlessDefault: boolean;
+    RecordingEnabled: boolean;
+    ControlBorderEnabled: boolean;
+    ProviderRouteDefault: string;
+    ProviderModelDefault: string;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
@@ -433,6 +456,13 @@ export class Settings {
         this.SelectedModel = source["SelectedModel"];
         this.SidebarOpen = source["SidebarOpen"];
         this.AutoUpdateEnabled = source["AutoUpdateEnabled"];
+        this.BrowserControlEnabled = source["BrowserControlEnabled"];
+        this.RuntimeBackend = source["RuntimeBackend"];
+        this.HeadlessDefault = source["HeadlessDefault"];
+        this.RecordingEnabled = source["RecordingEnabled"];
+        this.ControlBorderEnabled = source["ControlBorderEnabled"];
+        this.ProviderRouteDefault = source["ProviderRouteDefault"];
+        this.ProviderModelDefault = source["ProviderModelDefault"];
     }
 }
 export class SettingsResponse {
@@ -510,6 +540,15 @@ export class ChatRequest {
     file_tools?: boolean;
     forceUpdate?: boolean;
     think?: any;
+    browserControlEnabled?: boolean;
+    runtimeBackend?: string;
+    runtimeCDPURL?: string;
+    runtimeTabIndex?: number;
+    runtimeTabMatch?: string;
+    runtimeTabPolicy?: string;
+    runtimeMaxSteps?: number;
+    providerRoute?: string;
+    providerModel?: string;
 
     constructor(source: any = {}) {
         if ('string' === typeof source) source = JSON.parse(source);
@@ -521,6 +560,15 @@ export class ChatRequest {
         this.file_tools = source["file_tools"];
         this.forceUpdate = source["forceUpdate"];
         this.think = source["think"];
+        this.browserControlEnabled = source["browserControlEnabled"];
+        this.runtimeBackend = source["runtimeBackend"];
+        this.runtimeCDPURL = source["runtimeCDPURL"];
+        this.runtimeTabIndex = source["runtimeTabIndex"];
+        this.runtimeTabMatch = source["runtimeTabMatch"];
+        this.runtimeTabPolicy = source["runtimeTabPolicy"];
+        this.runtimeMaxSteps = source["runtimeMaxSteps"];
+        this.providerRoute = source["providerRoute"];
+        this.providerModel = source["providerModel"];
     }
 
 	convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchUser, fetchConnectUrl, disconnectUser } from "@/api";
+import { APP_AUTH_PROVIDER } from "@/api";
 
 export function useUser() {
   const queryClient = useQueryClient();
@@ -7,12 +8,15 @@ export function useUser() {
   const userQuery = useQuery({
     queryKey: ["user"],
     queryFn: async () => {
+      if (APP_AUTH_PROVIDER === "clerk") {
+        return null;
+      }
       const result = await fetchUser();
       return result;
     },
     staleTime: 5 * 60 * 1000, // Consider data stale after 5 minutes
     gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
-    retry: 10,
+    retry: APP_AUTH_PROVIDER === "clerk" ? false : 10,
     retryDelay: (attemptIndex) => Math.min(500 * attemptIndex, 2000),
     refetchOnMount: true, // Always fetch when component mounts
   });

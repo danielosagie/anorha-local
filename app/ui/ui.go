@@ -4,11 +4,14 @@
 package ui
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -23,6 +26,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/app/agentruntime"
+	"github.com/ollama/ollama/app/credentials"
 	"github.com/ollama/ollama/app/server"
 	"github.com/ollama/ollama/app/store"
 	"github.com/ollama/ollama/app/tools"
@@ -111,6 +116,9 @@ type Server struct {
 	// Updater for checking and downloading updates
 	Updater             *updater.Updater
 	UpdateAvailableFunc func()
+
+	AgentRuntime     *agentruntime.Client
+	CredentialsStore *credentials.Store
 }
 
 func (s *Server) log() *slog.Logger {
@@ -289,6 +297,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/model/upstream", handle(s.modelUpstream))
 	mux.Handle("GET /api/v1/settings", handle(s.getSettings))
 	mux.Handle("POST /api/v1/settings", handle(s.settings))
+	mux.Handle("GET /api/v1/providers/models", handle(s.providerModels))
+	mux.Handle("GET /api/v1/credentials/status", handle(s.credentialStatus))
+	mux.Handle("POST /api/v1/credentials", handle(s.setCredential))
 	mux.Handle("GET /api/v1/cloud", handle(s.getCloudSetting))
 	mux.Handle("POST /api/v1/cloud", handle(s.cloudSetting))
 
@@ -717,6 +728,18 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	providerRoute, providerModel := resolveProviderSelection(req)
+	browserControlEnabled := req.BrowserControlEnabled != nil && *req.BrowserControlEnabled
+
+	if browserControlEnabled {
+		runtimeBackend := s.resolveRuntimeBackend(req.RuntimeBackend)
+		return s.chatWithBrowserRuntime(ctx, w, flusher, chat, req, cid, providerRoute, providerModel, runtimeBackend)
+	}
+
+	if providerRoute == agentruntime.ProviderRouteOpenRouter {
+		return s.chatWithOpenRouter(ctx, w, flusher, chat, req, providerModel)
+	}
+
 	_, cancelLoading := context.WithCancel(ctx)
 	loading := false
 
@@ -835,6 +858,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 	if !hasAttachments {
 		WebSearchEnabled := req.WebSearch != nil && *req.WebSearch
 		hasToolsCapability := slices.Contains(details.Capabilities, model.CapabilityTools)
+
+		if browserControlEnabled {
+			registry.Register(tools.NewBrowserUse(s.AgentRuntime, cid, providerRoute, providerModel))
+		}
 
 		if WebSearchEnabled && hasToolsCapability {
 			if supportsBrowserTools(req.Model) {
@@ -1042,13 +1069,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 						// so the second-pass model can consume results, while keeping browser state flow intact.
 						// We still persist tool msg with content below.
 						// (No browser state update needed for standalone.)
-					} else if strings.HasPrefix(toolCall.Function.Name, "browser") {
-						stateBytes, err := json.Marshal(browser.State())
-						if err != nil {
-							return fmt.Errorf("failed to marshal browser state: %w", err)
-						}
-						if err := s.Store.UpdateChatBrowserState(chat.ID, json.RawMessage(stateBytes)); err != nil {
-							return fmt.Errorf("failed to persist browser state to chat: %w", err)
+					} else if isLegacyBrowserTool(toolCall.Function.Name) {
+						if err := s.persistLegacyBrowserState(chat.ID, toolCall.Function.Name, browser); err != nil {
+							return err
 						}
 						// tool result is not added to the tool message for the browser tool
 					} else {
@@ -1219,6 +1242,593 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 		chat.Messages[len(chat.Messages)-1].Stream = false
 	}
 	return s.Store.SetChat(*chat)
+}
+
+func emitStreamEvent(w http.ResponseWriter, flusher http.Flusher, event any) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Best-effort stream write: if the client disconnected or writer is torn down,
+			// surface a normal error instead of crashing the whole app.
+			err = fmt.Errorf("stream write panic: %v", r)
+		}
+	}()
+
+	if err := json.NewEncoder(w).Encode(event); err != nil {
+		return err
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return nil
+}
+
+func emitStreamErrorAndDone(w http.ResponseWriter, flusher http.Flusher, message, code string) error {
+	if err := emitStreamEvent(w, flusher, responses.ErrorEvent{
+		EventName: "error",
+		Error:     message,
+		Code:      code,
+	}); err != nil {
+		return err
+	}
+	return emitStreamEvent(w, flusher, responses.ChatEvent{EventName: "done"})
+}
+
+func runtimeEventToolResultRaw(event agentruntime.Event) *json.RawMessage {
+	if event.ToolResultData != nil {
+		data, err := json.Marshal(event.ToolResultData)
+		if err == nil {
+			raw := json.RawMessage(data)
+			return &raw
+		}
+	}
+	if event.ToolResult != nil {
+		data, err := json.Marshal(map[string]any{"success": *event.ToolResult})
+		if err == nil {
+			raw := json.RawMessage(data)
+			return &raw
+		}
+	}
+	return nil
+}
+
+func runtimeEventContent(event agentruntime.Event) string {
+	content := strings.TrimSpace(event.Content)
+	if content != "" {
+		return content
+	}
+	switch event.EventName {
+	case "error":
+		if strings.TrimSpace(event.Error) != "" {
+			return strings.TrimSpace(event.Error)
+		}
+	case "tool_call":
+		return "Runtime tool call"
+	case "tool_result":
+		return "Runtime tool result"
+	}
+	return ""
+}
+
+func (s *Server) appendRuntimeEventMessage(chat *store.Chat, event agentruntime.Event, mu *sync.Mutex) {
+	content := runtimeEventContent(event)
+	if content == "" {
+		return
+	}
+
+	toolName := strings.TrimSpace(event.ToolName)
+	if toolName == "" {
+		toolName = "runtime." + event.EventName
+	}
+
+	msg := store.NewMessage("tool", content, &store.MessageOptions{
+		ToolResult: runtimeEventToolResultRaw(event),
+	})
+	msg.ToolName = toolName
+
+	mu.Lock()
+	chat.Messages = append(chat.Messages, msg)
+	mu.Unlock()
+
+	if err := s.Store.AppendMessage(chat.ID, msg); err != nil {
+		s.log().Warn("failed to persist runtime event message", "chat_id", chat.ID, "event", event.EventName, "error", err)
+	}
+}
+
+func (s *Server) persistAssistantMessage(chat *store.Chat, content, modelName string) error {
+	msg := store.NewMessage("assistant", content, &store.MessageOptions{Model: modelName})
+	chat.Messages = append(chat.Messages, msg)
+	if err := s.Store.AppendMessage(chat.ID, msg); err != nil {
+		return err
+	}
+	if len(chat.Messages) > 0 {
+		chat.Messages[len(chat.Messages)-1].Stream = false
+	}
+	return s.Store.SetChat(*chat)
+}
+
+func (s *Server) chatWithBrowserRuntime(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, chat *store.Chat, req responses.ChatRequest, chatID string, route agentruntime.ProviderRoute, providerModel string, backend agentruntime.RuntimeBackend) error {
+	if s.AgentRuntime == nil {
+		return emitStreamErrorAndDone(w, flusher, "Browser control runtime is not configured.", "browser_runtime_unavailable")
+	}
+
+	healthCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	err := s.AgentRuntime.Health(healthCtx)
+	cancel()
+	if err != nil {
+		s.log().Warn("browser runtime health check failed", "error", err)
+		return emitStreamErrorAndDone(w, flusher, "Browser control runtime is unavailable.", "browser_runtime_unhealthy")
+	}
+
+	options := agentruntime.RuntimeOptions{
+		BrowserControlEnabled: true,
+		Headless:              false,
+		WebToolsEnabled:       req.WebSearch != nil && *req.WebSearch,
+		RuntimeBackend:        backend,
+		RuntimeCDPURL:         strings.TrimSpace(req.RuntimeCDPURL),
+		RuntimeTabMatch:       strings.TrimSpace(req.RuntimeTabMatch),
+		RuntimeTabPolicy:      strings.TrimSpace(req.RuntimeTabPolicy),
+		RecordingEnabled:      false,
+		ControlBorderEnabled:  false,
+		ProviderRoute:         route,
+		ProviderModel:         providerModel,
+		EscalationEligible:    false,
+		VerificationRuns:      1,
+	}
+	if req.RuntimeTabIndex != nil && *req.RuntimeTabIndex > 0 {
+		options.RuntimeTabIndex = *req.RuntimeTabIndex
+	}
+	if req.RuntimeMaxSteps != nil && *req.RuntimeMaxSteps > 0 {
+		options.RuntimeMaxSteps = *req.RuntimeMaxSteps
+	}
+
+	if err := s.AgentRuntime.SetOptions(ctx, chatID, options); err != nil {
+		s.log().Warn("failed to set browser runtime options", "error", err)
+		return emitStreamErrorAndDone(w, flusher, "Failed to configure browser control runtime.", "browser_runtime_config_error")
+	}
+
+	var writeMu sync.Mutex
+	var chatMu sync.Mutex
+	streamCtx, stopStream := context.WithCancel(ctx)
+	defer stopStream()
+	streamErrCh := make(chan error, 1)
+	go func() {
+		err := s.AgentRuntime.StreamEvents(streamCtx, chatID, func(event agentruntime.Event) error {
+			switch event.EventName {
+			case "thinking", "tool_call", "tool_result", "media_event", "error":
+				// Forward runtime telemetry to the active chat stream for visibility.
+			default:
+				return nil
+			}
+			if event.EventName == "tool_call" || event.EventName == "tool_result" || event.EventName == "error" {
+				s.log().Info("browser runtime event",
+					"thread", chatID,
+					"event", event.EventName,
+					"tool", event.ToolName,
+					"content", strings.TrimSpace(event.Content),
+					"error", strings.TrimSpace(event.Error),
+				)
+			}
+			if event.EventName == "error" {
+				s.appendRuntimeEventMessage(chat, event, &chatMu)
+				writeMu.Lock()
+				defer writeMu.Unlock()
+				return emitStreamEvent(w, flusher, responses.ErrorEvent{
+					EventName: "error",
+					Error:     event.Error,
+					Code:      "browser_runtime_failed",
+				})
+			}
+
+			chatEvent := responses.ChatEvent{
+				EventName: event.EventName,
+			}
+			if event.Content != "" {
+				content := event.Content
+				chatEvent.Content = &content
+			}
+			if event.Thinking != "" {
+				thinking := event.Thinking
+				chatEvent.Thinking = &thinking
+			}
+			if event.ToolName != "" {
+				toolName := event.ToolName
+				chatEvent.ToolName = &toolName
+			}
+			if event.ToolResult != nil {
+				chatEvent.ToolResult = event.ToolResult
+			}
+			if event.ToolResultData != nil {
+				chatEvent.ToolResultData = event.ToolResultData
+			}
+			if event.ToolState != nil {
+				chatEvent.ToolState = event.ToolState
+			}
+			if event.Segment != nil {
+				chatEvent.ToolResultData = event.Segment
+			}
+
+			if event.EventName == "tool_call" || event.EventName == "tool_result" {
+				s.appendRuntimeEventMessage(chat, event, &chatMu)
+			}
+
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return emitStreamEvent(w, flusher, chatEvent)
+		})
+		if err != nil && streamCtx.Err() == nil {
+			streamErrCh <- err
+			return
+		}
+		close(streamErrCh)
+	}()
+
+	result, err := s.AgentRuntime.Run(ctx, agentruntime.RunPayload{
+		ThreadID: chatID,
+		Message:  req.Prompt,
+		Options:  options,
+	})
+	stopStream()
+	if err != nil {
+		s.log().Warn("browser runtime run failed", "error", err)
+		msg := strings.TrimSpace(err.Error())
+		if msg == "" {
+			msg = "Browser control runtime failed."
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return emitStreamErrorAndDone(w, flusher, msg, "browser_runtime_failed")
+	}
+	select {
+	case streamErr, ok := <-streamErrCh:
+		if ok && streamErr != nil {
+			s.log().Warn("browser runtime event stream error", "error", streamErr)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		s.log().Warn("timed out waiting for browser runtime event stream shutdown")
+	}
+
+	if result == nil || !result.Success {
+		msg := "Browser control runtime failed."
+		if result != nil && strings.TrimSpace(result.Error) != "" {
+			msg = strings.TrimSpace(result.Error)
+		}
+		return emitStreamErrorAndDone(w, flusher, msg, "browser_runtime_failed")
+	}
+
+	content := strings.TrimSpace(result.Summary)
+	if looksLikeGenericBrowserSummary(content) {
+		if extracted := extractRuntimeResponseText(result.Data); extracted != "" {
+			content = extracted
+		}
+	}
+	if content == "" {
+		content = "Browser task completed."
+	}
+
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	if err := emitStreamEvent(w, flusher, responses.ChatEvent{
+		EventName: "chat",
+		Content:   &content,
+	}); err != nil {
+		return err
+	}
+	if err := emitStreamEvent(w, flusher, responses.ChatEvent{EventName: "done"}); err != nil {
+		return err
+	}
+
+	chatMu.Lock()
+	defer chatMu.Unlock()
+	return s.persistAssistantMessage(chat, content, req.Model)
+}
+
+func parseRuntimeBackend(raw string) agentruntime.RuntimeBackend {
+	switch agentruntime.RuntimeBackend(strings.TrimSpace(raw)) {
+	case agentruntime.RuntimeBackendAttached:
+		return agentruntime.RuntimeBackendAttached
+	case agentruntime.RuntimeBackendPlaywright:
+		return agentruntime.RuntimeBackendPlaywright
+	case agentruntime.RuntimeBackendBrowserUse:
+		return agentruntime.RuntimeBackendBrowserUse
+	default:
+		return agentruntime.RuntimeBackendAttached
+	}
+}
+
+func (s *Server) resolveRuntimeBackend(requestBackend string) agentruntime.RuntimeBackend {
+	if strings.TrimSpace(requestBackend) != "" {
+		return parseRuntimeBackend(requestBackend)
+	}
+	if envBackend := strings.TrimSpace(os.Getenv("ANORHA_RUNTIME_BACKEND")); envBackend != "" {
+		return parseRuntimeBackend(envBackend)
+	}
+
+	settings, err := s.Store.Settings()
+	if err == nil && strings.TrimSpace(settings.RuntimeBackend) != "" {
+		if settings.RuntimeBackend == string(agentruntime.RuntimeBackendBrowserUse) {
+			// New default is attached-first; keep explicit non-browser_use values as-is.
+			return agentruntime.RuntimeBackendAttached
+		}
+		return parseRuntimeBackend(settings.RuntimeBackend)
+	}
+
+	return agentruntime.RuntimeBackendAttached
+}
+
+func looksLikeGenericBrowserSummary(summary string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(summary))
+	switch normalized {
+	case "", "browser task completed.", "browser-use runtime completed.", "execution complete.":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractRuntimeResponseText(data interface{}) string {
+	visited := map[uintptr]struct{}{}
+	return strings.TrimSpace(extractRuntimeResponseTextInner(data, visited))
+}
+
+func extractRuntimeResponseTextInner(data interface{}, visited map[uintptr]struct{}) string {
+	switch v := data.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case json.RawMessage:
+		if len(v) == 0 {
+			return ""
+		}
+		var decoded interface{}
+		if err := json.Unmarshal(v, &decoded); err != nil {
+			return ""
+		}
+		return extractRuntimeResponseTextInner(decoded, visited)
+	case map[string]interface{}:
+		priorityKeys := []string{"finalAnswer", "answer", "response", "output", "content", "message", "text", "summary"}
+		for _, key := range priorityKeys {
+			if value, ok := v[key]; ok {
+				if text := extractRuntimeResponseTextInner(value, visited); text != "" {
+					return text
+				}
+			}
+		}
+		for _, value := range v {
+			if text := extractRuntimeResponseTextInner(value, visited); text != "" {
+				return text
+			}
+		}
+		return ""
+	case []interface{}:
+		for _, item := range v {
+			if text := extractRuntimeResponseTextInner(item, visited); text != "" {
+				return text
+			}
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+func (s *Server) loadProviderSecret(provider credentials.Provider) (string, error) {
+	if envKey := credentials.EnvVarName(provider); envKey != "" {
+		if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
+			return value, nil
+		}
+	}
+	if s.CredentialsStore == nil {
+		return "", nil
+	}
+	secret, _, err := s.CredentialsStore.Get(provider)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(secret), nil
+}
+
+func (s *Server) listOpenRouterModels(ctx context.Context, apiKey string) ([]string, error) {
+	reqURL := strings.TrimRight(os.Getenv("OPENROUTER_BASE_URL"), "/")
+	if reqURL == "" {
+		reqURL = "https://openrouter.ai/api/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	models := make([]string, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		models = append(models, id)
+	}
+	return models, nil
+}
+
+type openRouterMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func buildOpenRouterMessages(chat *store.Chat) []openRouterMessage {
+	messages := make([]openRouterMessage, 0, len(chat.Messages))
+	for _, msg := range chat.Messages {
+		switch msg.Role {
+		case "system", "user", "assistant":
+		default:
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		messages = append(messages, openRouterMessage{
+			Role:    msg.Role,
+			Content: content,
+		})
+	}
+	return messages
+}
+
+func (s *Server) chatWithOpenRouter(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, chat *store.Chat, req responses.ChatRequest, providerModel string) error {
+	if req.ForceUpdate {
+		return emitStreamEvent(w, flusher, responses.ChatEvent{EventName: "done"})
+	}
+
+	apiKey, err := s.loadProviderSecret(credentials.ProviderOpenRouter)
+	if err != nil {
+		s.log().Warn("failed to load OpenRouter credential", "error", err)
+		return emitStreamErrorAndDone(w, flusher, "OpenRouter credential lookup failed.", "openrouter_auth_error")
+	}
+	if apiKey == "" {
+		return emitStreamErrorAndDone(w, flusher, "OpenRouter API key is not configured.", "openrouter_auth_missing")
+	}
+
+	modelID := strings.TrimSpace(providerModel)
+	if modelID == "" {
+		modelID = strings.TrimPrefix(strings.TrimSpace(req.Model), "openrouter/")
+	}
+	if modelID == "" {
+		return emitStreamErrorAndDone(w, flusher, "OpenRouter model is missing.", "openrouter_model_missing")
+	}
+
+	payload := map[string]any{
+		"model":    modelID,
+		"messages": buildOpenRouterMessages(chat),
+		"stream":   true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return emitStreamErrorAndDone(w, flusher, "Failed to encode OpenRouter request.", "openrouter_request_error")
+	}
+
+	reqURL := strings.TrimRight(os.Getenv("OPENROUTER_BASE_URL"), "/")
+	if reqURL == "" {
+		reqURL = "https://openrouter.ai/api/v1"
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return emitStreamErrorAndDone(w, flusher, "Failed to create OpenRouter request.", "openrouter_request_error")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := s.httpClient().Do(httpReq)
+	if err != nil {
+		s.log().Warn("openrouter request failed", "error", err)
+		return emitStreamErrorAndDone(w, flusher, "OpenRouter request failed.", "openrouter_request_error")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		message := strings.TrimSpace(string(raw))
+		if message == "" {
+			message = fmt.Sprintf("OpenRouter returned status %d", resp.StatusCode)
+		}
+		s.log().Warn("openrouter request returned error", "status", resp.StatusCode, "body", message)
+		return emitStreamErrorAndDone(w, flusher, message, "openrouter_http_error")
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+
+	var assistant strings.Builder
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
+			return emitStreamErrorAndDone(w, flusher, chunk.Error.Message, "openrouter_stream_error")
+		}
+
+		for _, choice := range chunk.Choices {
+			content := choice.Delta.Content
+			if content == "" {
+				content = choice.Message.Content
+			}
+			if content == "" {
+				continue
+			}
+			assistant.WriteString(content)
+			if err := emitStreamEvent(w, flusher, responses.ChatEvent{
+				EventName: "chat",
+				Content:   &content,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		s.log().Warn("openrouter stream read error", "error", err)
+		return emitStreamErrorAndDone(w, flusher, "OpenRouter stream interrupted.", "openrouter_stream_error")
+	}
+
+	content := assistant.String()
+	if strings.TrimSpace(content) == "" {
+		content = "No response from OpenRouter."
+	}
+
+	if err := emitStreamEvent(w, flusher, responses.ChatEvent{EventName: "done"}); err != nil {
+		return err
+	}
+
+	return s.persistAssistantMessage(chat, content, req.Model)
 }
 
 func (s *Server) getChat(w http.ResponseWriter, r *http.Request) error {
@@ -1482,6 +2092,142 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
+func parseProviderRoute(raw string) agentruntime.ProviderRoute {
+	switch agentruntime.ProviderRoute(strings.TrimSpace(raw)) {
+	case agentruntime.ProviderRouteOpenRouter:
+		return agentruntime.ProviderRouteOpenRouter
+	case agentruntime.ProviderRouteOllamaCloud:
+		return agentruntime.ProviderRouteOllamaCloud
+	case agentruntime.ProviderRouteKimi:
+		return agentruntime.ProviderRouteKimi
+	default:
+		return agentruntime.ProviderRouteLocalOllama
+	}
+}
+
+func resolveProviderSelection(req responses.ChatRequest) (agentruntime.ProviderRoute, string) {
+	route := parseProviderRoute(req.ProviderRoute)
+	providerModel := strings.TrimSpace(req.ProviderModel)
+	modelName := strings.TrimSpace(req.Model)
+
+	if strings.HasPrefix(modelName, "openrouter/") {
+		route = agentruntime.ProviderRouteOpenRouter
+		if providerModel == "" {
+			providerModel = strings.TrimPrefix(modelName, "openrouter/")
+		}
+	}
+
+	if providerModel == "" {
+		providerModel = modelName
+	}
+
+	return route, providerModel
+}
+
+func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) error {
+	route := parseProviderRoute(r.URL.Query().Get("route"))
+
+	models := []string{}
+	if s.AgentRuntime != nil {
+		list, err := s.AgentRuntime.ListModels(r.Context(), route)
+		if err != nil {
+			s.log().Warn("failed to list provider models", "route", route, "error", err)
+		} else {
+			models = list
+		}
+	}
+	if len(models) == 0 && route == agentruntime.ProviderRouteOpenRouter {
+		apiKey, err := s.loadProviderSecret(credentials.ProviderOpenRouter)
+		if err != nil {
+			s.log().Warn("failed to load OpenRouter credential for models list", "error", err)
+		}
+		if apiKey != "" {
+			if fallbackModels, err := s.listOpenRouterModels(r.Context(), apiKey); err == nil {
+				models = fallbackModels
+			} else {
+				s.log().Warn("failed to list OpenRouter models directly", "error", err)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{
+		"models": models,
+	})
+}
+
+func (s *Server) credentialStatus(w http.ResponseWriter, r *http.Request) error {
+	status := map[string]map[string]any{}
+
+	providers := []credentials.Provider{
+		credentials.ProviderOpenRouter,
+		credentials.ProviderKimi,
+		credentials.ProviderOllamaCloud,
+	}
+
+	for _, provider := range providers {
+		available := false
+		source := "none"
+
+		envValue := strings.TrimSpace(os.Getenv(credentials.EnvVarName(provider)))
+		if envValue != "" {
+			available = true
+			source = "env"
+		} else if s.CredentialsStore != nil {
+			ok, src := s.CredentialsStore.Status(provider)
+			available = ok
+			if src != "" {
+				source = src
+			}
+		}
+
+		status[string(provider)] = map[string]any{
+			"available": available,
+			"source":    source,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{"status": status})
+}
+
+func (s *Server) setCredential(w http.ResponseWriter, r *http.Request) error {
+	if s.CredentialsStore == nil {
+		return fmt.Errorf("credentials store is not available")
+	}
+
+	var req struct {
+		Provider string `json:"provider"`
+		Secret   string `json:"secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+
+	provider := credentials.Provider(strings.TrimSpace(req.Provider))
+	switch provider {
+	case credentials.ProviderOpenRouter, credentials.ProviderKimi, credentials.ProviderOllamaCloud:
+	default:
+		return fmt.Errorf("unsupported provider")
+	}
+
+	secret := strings.TrimSpace(req.Secret)
+	if secret == "" {
+		return fmt.Errorf("secret is required")
+	}
+
+	if err := s.CredentialsStore.Set(provider, secret); err != nil {
+		return fmt.Errorf("failed to save credential: %w", err)
+	}
+
+	if envKey := credentials.EnvVarName(provider); envKey != "" {
+		_ = os.Setenv(envKey, secret)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
 func (s *Server) cloudSetting(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -1672,6 +2418,32 @@ func supportsBrowserTools(model string) bool {
 	return strings.HasPrefix(strings.ToLower(model), "gpt-oss")
 }
 
+func isLegacyBrowserTool(name string) bool {
+	switch name {
+	case "browser.search", "browser.open", "browser.find":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) persistLegacyBrowserState(chatID string, toolName string, browser *tools.Browser) error {
+	if browser == nil {
+		s.log().Warn("legacy browser tool called without initialized browser state", "tool", toolName, "chat_id", chatID)
+		return nil
+	}
+
+	stateBytes, err := json.Marshal(browser.State())
+	if err != nil {
+		return fmt.Errorf("failed to marshal browser state: %w", err)
+	}
+
+	if err := s.Store.UpdateChatBrowserState(chatID, json.RawMessage(stateBytes)); err != nil {
+		return fmt.Errorf("failed to persist browser state to chat: %w", err)
+	}
+
+	return nil
+}
 
 // buildChatRequest converts store.Chat to api.ChatRequest
 func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, availableTools []map[string]any) (*api.ChatRequest, error) {

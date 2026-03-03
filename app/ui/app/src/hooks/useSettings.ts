@@ -11,6 +11,7 @@ interface SettingsState {
   sidebarOpen: boolean;
   thinkEnabled: boolean;
   thinkLevel: string;
+  browserControlEnabled: boolean;
 }
 
 // Type for partial settings updates
@@ -21,6 +22,7 @@ type SettingsUpdate = Partial<{
   ThinkLevel: string;
   SelectedModel: string;
   SidebarOpen: boolean;
+  BrowserControlEnabled: boolean;
 }>;
 
 export function useSettings() {
@@ -35,8 +37,20 @@ export function useSettings() {
   // Update settings with useMutation
   const updateSettingsMutation = useMutation({
     mutationFn: updateSettings,
-    onSuccess: () => {
-      // Invalidate the query to ensure fresh data
+    onMutate: async (nextSettings: Settings) => {
+      await queryClient.cancelQueries({ queryKey: ["settings"] });
+      const previousSettings = queryClient.getQueryData<{ settings: Settings }>([
+        "settings",
+      ]);
+      queryClient.setQueryData(["settings"], { settings: nextSettings });
+      return { previousSettings };
+    },
+    onError: (_error, _nextSettings, context) => {
+      if (context?.previousSettings) {
+        queryClient.setQueryData(["settings"], context.previousSettings);
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
   });
@@ -49,7 +63,9 @@ export function useSettings() {
       thinkEnabled: settingsData?.settings?.ThinkEnabled ?? false,
       thinkLevel: settingsData?.settings?.ThinkLevel ?? "none",
       selectedModel: settingsData?.settings?.SelectedModel ?? "",
-      sidebarOpen: settingsData?.settings?.SidebarOpen ?? false,
+      sidebarOpen: settingsData?.settings?.SidebarOpen ?? true,
+      browserControlEnabled:
+        settingsData?.settings?.BrowserControlEnabled ?? true,
     }),
     [settingsData?.settings],
   );
@@ -57,16 +73,19 @@ export function useSettings() {
   // Single function to update most settings
   const setSettings = useCallback(
     async (updates: SettingsUpdate) => {
-      if (!settingsData?.settings) return;
+      const cachedSettings =
+        queryClient.getQueryData<{ settings: Settings }>(["settings"])
+          ?.settings || settingsData?.settings;
+      if (!cachedSettings) return;
 
       const updatedSettings = new Settings({
-        ...settingsData.settings,
+        ...cachedSettings,
         ...updates,
       });
 
       await updateSettingsMutation.mutateAsync(updatedSettings);
     },
-    [settingsData?.settings, updateSettingsMutation],
+    [queryClient, settingsData?.settings, updateSettingsMutation],
   );
 
   return useMemo(

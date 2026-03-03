@@ -1,6 +1,10 @@
 import Logo from "@/components/Logo";
 import { ModelPicker } from "@/components/ModelPicker";
 import { WebSearchButton } from "@/components/WebSearchButton";
+import {
+  BrowserControlButton,
+  type BrowserRuntimeConfig,
+} from "@/components/BrowserControlButton";
 import { ImageThumbnail } from "@/components/ImageThumbnail";
 import { isImageFile } from "@/utils/imageUtils";
 import {
@@ -10,6 +14,7 @@ import {
   useLayoutEffect,
   useCallback,
 } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   useSendMessage,
   useIsStreaming,
@@ -21,11 +26,10 @@ import {
   useHasVisionCapability,
   useHasToolsCapability,
 } from "@/hooks/useModelCapabilities";
-import { useUser } from "@/hooks/useUser";
-import { DisplayLogin } from "@/components/DisplayLogin";
 import { ErrorEvent, Message } from "@/gotypes";
 import { useSettings } from "@/hooks/useSettings";
 import { useCloudStatus } from "@/hooks/useCloudStatus";
+import { getCredentialStatus } from "@/api";
 import { ThinkButton } from "./ThinkButton";
 import { ErrorMessage } from "./ErrorMessage";
 import { processFiles } from "@/utils/fileValidation";
@@ -60,6 +64,17 @@ interface ChatFormProps {
       webSearch?: boolean;
       fileTools?: boolean;
       think?: boolean | string;
+      runtimeOptions?: {
+        browserControlEnabled?: boolean;
+        runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeCDPURL?: string;
+        runtimeTabIndex?: number;
+        runtimeTabMatch?: string;
+        runtimeTabPolicy?: "pinned" | "ask" | "active";
+        runtimeMaxSteps?: number;
+        providerRoute?: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter";
+        providerModel?: string;
+      };
     },
   ) => void;
   autoFocus?: boolean;
@@ -92,6 +107,14 @@ function ChatForm({
   onCancelEdit,
   onFilesReceived,
 }: ChatFormProps) {
+  const defaultRuntimeConfig: BrowserRuntimeConfig = {
+    runtimeBackend: "playwright_attached",
+    runtimeCDPURL: "http://127.0.0.1:9222",
+    runtimeTabPolicy: "pinned",
+    runtimeTabIndex: undefined,
+    runtimeTabMatch: "",
+    runtimeMaxSteps: 8,
+  };
   const [message, setMessage] = useState<MessageInput>({
     content: "",
     attachments: [],
@@ -104,6 +127,7 @@ function ChatForm({
   const thinkButtonRef = useRef<HTMLButtonElement>(null);
   const thinkingLevelButtonRef = useRef<HTMLButtonElement>(null);
   const webSearchButtonRef = useRef<HTMLButtonElement>(null);
+  const browserControlButtonRef = useRef<HTMLButtonElement>(null);
   const modelPickerRef = useRef<HTMLButtonElement>(null);
   const submitButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -114,10 +138,6 @@ function ChatForm({
   const isDownloading = isDownloadingModel;
   const { selectedModel } = useSelectedModel();
   const hasVisionCapability = useHasVisionCapability(selectedModel?.model);
-  const { isAuthenticated, isLoading: isLoadingUser } = useUser();
-  const [loginPromptFeature, setLoginPromptFeature] = useState<
-    "webSearch" | "turbo" | null
-  >(null);
   const [fileUploadError, setFileUploadError] = useState<ErrorEvent | null>(
     null,
   );
@@ -140,6 +160,13 @@ function ChatForm({
     ) {
       (thinkingLevelButtonRef.current as any).closeDropdown();
     }
+    if (
+      isOpen &&
+      browserControlButtonRef.current &&
+      (browserControlButtonRef.current as any).closeDropdown
+    ) {
+      (browserControlButtonRef.current as any).closeDropdown();
+    }
   };
 
   const {
@@ -147,10 +174,29 @@ function ChatForm({
       webSearchEnabled,
       thinkEnabled,
       thinkLevel: settingsThinkLevel,
+      browserControlEnabled,
     },
     setSettings,
   } = useSettings();
   const { cloudDisabled } = useCloudStatus();
+  const { data: credentialStatus } = useQuery({
+    queryKey: ["credentialStatus"],
+    queryFn: getCredentialStatus,
+    staleTime: 30_000,
+  });
+  const [runtimeConfig, setRuntimeConfig] = useState<BrowserRuntimeConfig>(() => {
+    try {
+      const raw = localStorage.getItem("anorha.browserRuntimeConfig");
+      if (!raw) return defaultRuntimeConfig;
+      const parsed = JSON.parse(raw) as Partial<BrowserRuntimeConfig>;
+      return {
+        ...defaultRuntimeConfig,
+        ...parsed,
+      };
+    } catch {
+      return defaultRuntimeConfig;
+    }
+  });
 
   const supportsWebSearch = useHasToolsCapability(selectedModel?.model);
   // Use per-chat thinking level instead of global
@@ -166,6 +212,10 @@ function ChatForm({
     selectedModel?.model.toLowerCase().startsWith("gpt-oss") || false;
   const supportsThinkToggling =
     selectedModel?.model.toLowerCase().startsWith("deepseek-v3.1") || false;
+
+  useEffect(() => {
+    localStorage.setItem("anorha.browserRuntimeConfig", JSON.stringify(runtimeConfig));
+  }, [runtimeConfig]);
 
   useEffect(() => {
     if (supportsThinkToggling && thinkEnabled && webSearchEnabled) {
@@ -237,26 +287,28 @@ function ChatForm({
     }
   }, [onFilesReceived, handleFilesReceived]);
 
-  // Determine if login banner should be shown
-  const shouldShowLoginBanner =
+  const selectedModelName = selectedModel?.model || "";
+  const providerRoute: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter" =
+    selectedModelName.startsWith("openrouter/")
+      ? "openrouter"
+      : selectedModel?.isCloud()
+        ? "ollama_cloud"
+        : "local_ollama";
+  const providerModel =
+    providerRoute === "openrouter"
+      ? selectedModelName.replace(/^openrouter\//, "")
+      : selectedModelName;
+  const providerCredentialKey =
+    providerRoute === "local_ollama" ? null : providerRoute;
+  const providerCredentialAvailable = providerCredentialKey
+    ? credentialStatus?.[providerCredentialKey]?.available === true
+    : true;
+  const credentialStatusLoaded = credentialStatus !== undefined;
+  const providerCredentialMissing =
     !cloudDisabled &&
-    !isLoadingUser &&
-    !isAuthenticated &&
-    ((webSearchEnabled && supportsWebSearch) || selectedModel?.isCloud());
-
-  // Determine which feature to highlight in the banner
-  const getActiveFeatureForBanner = () => {
-    if (cloudDisabled) return null;
-    if (!isAuthenticated) {
-      if (loginPromptFeature) return loginPromptFeature;
-      if (webSearchEnabled && selectedModel?.isCloud()) return "webSearch";
-      if (webSearchEnabled) return "webSearch";
-      if (selectedModel?.isCloud()) return "turbo";
-    }
-    return null;
-  };
-
-  const activeFeatureForBanner = getActiveFeatureForBanner();
+    credentialStatusLoaded &&
+    providerCredentialKey !== null &&
+    !providerCredentialAvailable;
 
   const resetChatForm = () => {
     setMessage({
@@ -269,17 +321,6 @@ function ChatForm({
       textareaRef.current.style.height = "auto";
     }
   };
-
-  // Clear loginPromptFeature when user becomes authenticated or no features are enabled
-  useEffect(() => {
-    if (
-      isAuthenticated ||
-      cloudDisabled ||
-      (!webSearchEnabled && !!selectedModel?.isCloud())
-    ) {
-      setLoginPromptFeature(null);
-    }
-  }, [isAuthenticated, webSearchEnabled, selectedModel, cloudDisabled]);
 
   // When entering edit mode, populate the composition with existing data
   useEffect(() => {
@@ -348,6 +389,7 @@ function ChatForm({
         textareaRef,
         modelSupportsThinkingLevels ? thinkingLevelButtonRef : thinkButtonRef,
         webSearchButtonRef,
+        browserControlButtonRef,
         modelPickerRef,
         submitButtonRef,
       ]
@@ -414,6 +456,7 @@ function ChatForm({
             ? thinkingLevelButtonRef.current
             : thinkButtonRef.current,
           webSearchButtonRef.current,
+          browserControlButtonRef.current,
           modelPickerRef.current,
           submitButtonRef.current,
         ].filter(Boolean) as HTMLElement[];
@@ -475,8 +518,7 @@ function ChatForm({
       return;
     }
 
-    // Check if cloud mode is enabled but user is not authenticated
-    if (shouldShowLoginBanner) {
+    if (providerCredentialMissing) {
       return;
     }
 
@@ -495,13 +537,23 @@ function ChatForm({
       : supportsThinkToggling
         ? thinkEnabled
         : undefined;
-
     if (onSubmit) {
       onSubmit(message.content, {
         attachments: attachmentsToSend,
         index: undefined,
         webSearch: useWebSearch,
         think: useThink,
+        runtimeOptions: {
+          browserControlEnabled,
+          runtimeBackend: runtimeConfig.runtimeBackend,
+          runtimeCDPURL: runtimeConfig.runtimeCDPURL,
+          runtimeTabIndex: runtimeConfig.runtimeTabIndex,
+          runtimeTabMatch: runtimeConfig.runtimeTabMatch || undefined,
+          runtimeTabPolicy: runtimeConfig.runtimeTabPolicy,
+          runtimeMaxSteps: runtimeConfig.runtimeMaxSteps,
+          providerRoute,
+          providerModel,
+        },
       });
     } else {
       sendMessageMutation({
@@ -509,6 +561,17 @@ function ChatForm({
         attachments: attachmentsToSend,
         webSearch: useWebSearch,
         think: useThink,
+        runtimeOptions: {
+          browserControlEnabled,
+          runtimeBackend: runtimeConfig.runtimeBackend,
+          runtimeCDPURL: runtimeConfig.runtimeCDPURL,
+          runtimeTabIndex: runtimeConfig.runtimeTabIndex,
+          runtimeTabMatch: runtimeConfig.runtimeTabMatch || undefined,
+          runtimeTabPolicy: runtimeConfig.runtimeTabPolicy,
+          runtimeMaxSteps: runtimeConfig.runtimeMaxSteps,
+          providerRoute,
+          providerModel,
+        },
         onChatEvent: (event) => {
           if (event.eventName === "chat_created" && event.chatId) {
             navigate({
@@ -556,6 +619,7 @@ function ChatForm({
           ? thinkingLevelButtonRef.current
           : thinkButtonRef.current,
         webSearchButtonRef.current,
+        browserControlButtonRef.current,
         modelPickerRef.current,
         submitButtonRef.current,
       ].filter(Boolean);
@@ -692,30 +756,19 @@ function ChatForm({
     <div className={`pb-3 px-3 ${hasMessages ? "mt-auto" : "my-auto"}`}>
       {chatId === "new" && <Logo />}
 
-      {shouldShowLoginBanner && (
-        <DisplayLogin
-          error={
-            new ErrorEvent({
-              eventName: "error",
-              error:
-                activeFeatureForBanner === "webSearch"
-                  ? "Web search requires authentication"
-                  : "Cloud models require authentication",
-              code: "cloud_unauthorized",
-            })
-          }
-          message={
-            activeFeatureForBanner === "webSearch"
-              ? "Web search requires an Ollama account"
-              : "Cloud models require an Ollama account"
-          }
-          className="mb-4"
-          onDismiss={() => {
-            // Disable the active features when dismissing
-            if (webSearchEnabled) setSettings({ WebSearchEnabled: false });
-            setLoginPromptFeature(null);
-          }}
-        />
+      {providerCredentialMissing && (
+        <div className="mb-4 rounded-lg border border-amber-300/70 dark:border-amber-700 bg-amber-50/70 dark:bg-amber-950/30 p-3 text-sm text-amber-900 dark:text-amber-100">
+          <div className="font-semibold">Provider credential required</div>
+          <div>
+            Add a{" "}
+            {providerCredentialKey === "ollama_cloud"
+              ? "Ollama Cloud"
+              : providerCredentialKey === "openrouter"
+                ? "OpenRouter"
+                : "Kimi"}{" "}
+            API key in Settings to use this model route.
+          </div>
+        </div>
       )}
 
       {/* File upload error message */}
@@ -913,9 +966,6 @@ function ChatForm({
                   isVisible={supportsWebSearch && cloudDisabled === false}
                   isActive={webSearchEnabled}
                   onToggle={() => {
-                    if (!webSearchEnabled && !isAuthenticated) {
-                      setLoginPromptFeature("webSearch");
-                    }
                     const enable = !webSearchEnabled;
                     if (supportsThinkToggling && enable) {
                       setSettings({
@@ -926,6 +976,22 @@ function ChatForm({
                     }
                     setSettings({ WebSearchEnabled: enable });
                   }}
+                />
+                <BrowserControlButton
+                  ref={browserControlButtonRef}
+                  isActive={browserControlEnabled}
+                  onToggle={() =>
+                    setSettings({
+                      BrowserControlEnabled: !browserControlEnabled,
+                    })
+                  }
+                  config={runtimeConfig}
+                  onConfigChange={(next) =>
+                    setRuntimeConfig((prev) => ({
+                      ...prev,
+                      ...next,
+                    }))
+                  }
                 />
               </div>
             </div>
@@ -950,7 +1016,7 @@ function ChatForm({
                 !isStreaming &&
                 !isDownloading &&
                 (!message.content.trim() ||
-                  shouldShowLoginBanner ||
+                  providerCredentialMissing ||
                   (cloudDisabled && selectedModel?.isCloud()) ||
                   message.fileErrors.length > 0)
               }

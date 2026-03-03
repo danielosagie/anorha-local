@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ollama/ollama/app/agentruntime"
 	"github.com/ollama/ollama/app/auth"
+	"github.com/ollama/ollama/app/credentials"
 	"github.com/ollama/ollama/app/logrotate"
 	"github.com/ollama/ollama/app/server"
 	"github.com/ollama/ollama/app/store"
@@ -44,6 +46,34 @@ var (
 	fastStartup = false
 	devMode     = false
 )
+
+func externalOllamaReachable() bool {
+	host := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	if host == "" {
+		host = "http://127.0.0.1:11434"
+	}
+	if !strings.Contains(host, "://") {
+		host = "http://" + host
+	}
+	base, err := url.Parse(host)
+	if err != nil {
+		slog.Warn("invalid OLLAMA_HOST, cannot probe external server", "host", host, "error", err)
+		return false
+	}
+
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(base.String(), "/")+"/api/version", nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
 
 type appMove int
 
@@ -193,7 +223,11 @@ func main() {
 	var ln net.Listener
 	if devMode {
 		// Use a fixed port in dev mode for predictable API access
-		ln, err = net.Listen("tcp", "127.0.0.1:3001")
+		appPort := strings.TrimSpace(os.Getenv("ANORHA_APP_PORT"))
+		if appPort == "" {
+			appPort = "3001"
+		}
+		ln, err = net.Listen("tcp", "127.0.0.1:"+appPort)
 	} else {
 		ln, err = net.Listen("tcp", "127.0.0.1:0")
 	}
@@ -214,11 +248,18 @@ func main() {
 	// Enable CORS in development mode
 	if devMode {
 		os.Setenv("OLLAMA_CORS", "1")
+		vitePort := strings.TrimSpace(os.Getenv("ANORHA_VITE_PORT"))
+		if vitePort == "" {
+			vitePort = "5173"
+		}
 
 		// Check if Vite dev server is running on port 5173
 		var conn net.Conn
 		var err error
-		for _, addr := range []string{"127.0.0.1:5173", "localhost:5173"} {
+		for _, addr := range []string{
+			fmt.Sprintf("127.0.0.1:%s", vitePort),
+			fmt.Sprintf("localhost:%s", vitePort),
+		} {
 			conn, err = net.DialTimeout("tcp", addr, 2*time.Second)
 			if err == nil {
 				conn.Close()
@@ -227,8 +268,8 @@ func main() {
 		}
 
 		if err != nil {
-			slog.Error("Vite dev server not running on port 5173")
-			fmt.Fprintln(os.Stderr, "Error: Vite dev server is not running on port 5173")
+			slog.Error("Vite dev server not running", "port", vitePort)
+			fmt.Fprintf(os.Stderr, "Error: Vite dev server is not running on port %s\n", vitePort)
 			fmt.Fprintln(os.Stderr, "Please run 'npm run dev' in the ui/app directory to start the UI in development mode")
 			os.Exit(1)
 		}
@@ -250,16 +291,50 @@ func main() {
 	wv.Store = st
 	done := make(chan error, 1)
 	osrv := server.New(st, devMode)
-	go func() {
-		slog.Info("starting ollama server")
-		done <- osrv.Run(octx)
-	}()
+	managedOllama := true
+	if externalOllamaReachable() {
+		managedOllama = false
+		slog.Info("detected external ollama server; skipping managed server startup")
+		close(done)
+	} else {
+		go func() {
+			slog.Info("starting ollama server")
+			done <- osrv.Run(octx)
+		}()
+	}
 
 	upd := &updater.Updater{Store: st}
+	agentRuntime := agentruntime.NewSidecarManager("", slog.Default())
+	if err := agentRuntime.EnsureRunning(ctx); err != nil {
+		slog.Warn("failed to start agent runtime sidecar; browser control runtime is unavailable", "error", err)
+	}
+	credentialsStore := credentials.NewStore("anorha-local")
+	for _, provider := range []credentials.Provider{
+		credentials.ProviderOpenRouter,
+		credentials.ProviderKimi,
+		credentials.ProviderOllamaCloud,
+	} {
+		envKey := credentials.EnvVarName(provider)
+		if envKey == "" || strings.TrimSpace(os.Getenv(envKey)) != "" {
+			continue
+		}
+		secret, source, err := credentialsStore.Get(provider)
+		if err != nil {
+			slog.Warn("failed loading provider credential", "provider", provider, "error", err)
+			continue
+		}
+		if source == "keychain" && strings.TrimSpace(secret) != "" {
+			_ = os.Setenv(envKey, secret)
+		}
+	}
 
 	uiServer := ui.Server{
 		Token: token,
 		Restart: func() {
+			if !managedOllama {
+				slog.Info("restart requested while using external ollama server; skipping managed restart")
+				return
+			}
 			ocancel()
 			<-done
 			octx, ocancel = context.WithCancel(ctx)
@@ -275,6 +350,8 @@ func main() {
 		UpdateAvailableFunc: func() {
 			UpdateAvailable("")
 		},
+		AgentRuntime:     agentRuntime.Client(),
+		CredentialsStore: credentialsStore,
 	}
 
 	srv := &http.Server{
@@ -355,8 +432,11 @@ func main() {
 	}
 
 	slog.Info("shutting down ollama server")
+	agentRuntime.Stop()
 	cancel()
-	<-done
+	if managedOllama {
+		<-done
+	}
 }
 
 func startHiddenTasks() {

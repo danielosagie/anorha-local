@@ -169,6 +169,27 @@ type Settings struct {
 
 	// AutoUpdateEnabled indicates if automatic updates should be downloaded
 	AutoUpdateEnabled bool
+
+	// BrowserControlEnabled indicates whether the sidecar runtime handles browser tasks
+	BrowserControlEnabled bool
+
+	// RuntimeBackend controls runtime adapter selection
+	RuntimeBackend string
+
+	// HeadlessDefault controls default visible/headless runtime behavior
+	HeadlessDefault bool
+
+	// RecordingEnabled controls whether headless recordings are captured
+	RecordingEnabled bool
+
+	// ControlBorderEnabled controls whether visible sessions get a green border
+	ControlBorderEnabled bool
+
+	// ProviderRouteDefault chooses runtime provider route
+	ProviderRouteDefault string
+
+	// ProviderModelDefault selects preferred provider model
+	ProviderModelDefault string
 }
 
 type Store struct {

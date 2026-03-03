@@ -133,6 +133,17 @@ export default function Chat({ chatId }: { chatId: string }) {
       webSearch?: boolean;
       fileTools?: boolean;
       think?: boolean | string;
+      runtimeOptions?: {
+        browserControlEnabled?: boolean;
+        runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeCDPURL?: string;
+        runtimeTabIndex?: number;
+        runtimeTabMatch?: string;
+        runtimeTabPolicy?: "pinned" | "ask" | "active";
+        runtimeMaxSteps?: number;
+        providerRoute?: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter";
+        providerModel?: string;
+      };
     },
   ) => {
     // Clear any existing errors when sending a new message
@@ -154,6 +165,7 @@ export default function Chat({ chatId }: { chatId: string }) {
       webSearch: options.webSearch,
       fileTools: options.fileTools,
       think: options.think,
+      runtimeOptions: options.runtimeOptions,
       onChatEvent: (event) => {
         if (event.eventName === "chat_created" && event.chatId) {
           navigate({
@@ -178,6 +190,20 @@ export default function Chat({ chatId }: { chatId: string }) {
       originalMessage: messages[index],
     });
   };
+
+  const handleQuickRuntimeCommand = useCallback(
+    (command: string) => {
+      const trimmed = command.trim();
+      if (!trimmed) return;
+      if (isStreaming || isWaitingForLoad) return;
+      handleChatFormSubmit(trimmed, {
+        runtimeOptions: {
+          browserControlEnabled: true,
+        },
+      });
+    },
+    [isStreaming, isWaitingForLoad, handleChatFormSubmit],
+  );
 
   const handleCancelEdit = () => {
     setEditingMessage(null);
@@ -236,6 +262,7 @@ export default function Chat({ chatId }: { chatId: string }) {
               editingMessageIndex={editingMessage?.index}
               error={chatError}
               browserToolResult={browserToolResult}
+              onQuickRuntimeCommand={handleQuickRuntimeCommand}
             />
           </section>
 

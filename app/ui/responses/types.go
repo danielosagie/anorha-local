@@ -118,14 +118,23 @@ type Attachment struct {
 }
 
 type ChatRequest struct {
-	Model       string       `json:"model"`
-	Prompt      string       `json:"prompt"`
-	Index       *int         `json:"index,omitempty"`
-	Attachments []Attachment `json:"attachments,omitempty"`
-	WebSearch   *bool        `json:"web_search,omitempty"`
-	FileTools   *bool        `json:"file_tools,omitempty"`
-	ForceUpdate bool         `json:"forceUpdate,omitempty"`
-	Think       any          `json:"think,omitempty"`
+	Model                 string       `json:"model"`
+	Prompt                string       `json:"prompt"`
+	Index                 *int         `json:"index,omitempty"`
+	Attachments           []Attachment `json:"attachments,omitempty"`
+	WebSearch             *bool        `json:"web_search,omitempty"`
+	FileTools             *bool        `json:"file_tools,omitempty"`
+	ForceUpdate           bool         `json:"forceUpdate,omitempty"`
+	Think                 any          `json:"think,omitempty"`
+	BrowserControlEnabled *bool        `json:"browserControlEnabled,omitempty"`
+	RuntimeBackend        string       `json:"runtimeBackend,omitempty"`
+	RuntimeCDPURL         string       `json:"runtimeCDPURL,omitempty"`
+	RuntimeTabIndex       *int         `json:"runtimeTabIndex,omitempty"`
+	RuntimeTabMatch       string       `json:"runtimeTabMatch,omitempty"`
+	RuntimeTabPolicy      string       `json:"runtimeTabPolicy,omitempty"`
+	RuntimeMaxSteps       *int         `json:"runtimeMaxSteps,omitempty"`
+	ProviderRoute         string       `json:"providerRoute,omitempty"`
+	ProviderModel         string       `json:"providerModel,omitempty"`
 }
 
 type Error struct {

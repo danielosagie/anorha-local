@@ -32,7 +32,7 @@ function RouteComponent() {
   // Handle "new" chat case - just use Chat component which handles everything
   if (chatId === "new") {
     return (
-      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} />}>
+      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} currentSection="chat" />}>
         <Chat chatId={chatId} />
       </SidebarLayout>
     );
@@ -41,7 +41,7 @@ function RouteComponent() {
   // Handle existing chat case
   if (chatLoading) {
     return (
-      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} />}>
+      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} currentSection="chat" />}>
         <div className="p-4">Loading chat...</div>
       </SidebarLayout>
     );
@@ -49,7 +49,7 @@ function RouteComponent() {
 
   if (chatError) {
     return (
-      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} />}>
+      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} currentSection="chat" />}>
         <div className="p-4 text-red-500">Error loading chat</div>
       </SidebarLayout>
     );
@@ -57,14 +57,14 @@ function RouteComponent() {
 
   if (!chatData) {
     return (
-      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} />}>
+      <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} currentSection="chat" />}>
         <div className="p-4">Chat not found</div>
       </SidebarLayout>
     );
   }
 
   return (
-    <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} />}>
+    <SidebarLayout sidebar={<ChatSidebar currentChatId={chatId} currentSection="chat" />}>
       <Chat chatId={chatId} />
     </SidebarLayout>
   );

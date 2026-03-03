@@ -11,11 +11,18 @@
 // Import Routes
 
 import { Route as rootRoute } from './routes/__root'
+import { Route as WorkflowsImport } from './routes/workflows'
 import { Route as SettingsImport } from './routes/settings'
 import { Route as IndexImport } from './routes/index'
 import { Route as CChatIdImport } from './routes/c.$chatId'
 
 // Create/Update Routes
+
+const WorkflowsRoute = WorkflowsImport.update({
+  id: '/workflows',
+  path: '/workflows',
+  getParentRoute: () => rootRoute,
+} as any)
 
 const SettingsRoute = SettingsImport.update({
   id: '/settings',
@@ -53,6 +60,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsImport
       parentRoute: typeof rootRoute
     }
+    '/workflows': {
+      id: '/workflows'
+      path: '/workflows'
+      fullPath: '/workflows'
+      preLoaderRoute: typeof WorkflowsImport
+      parentRoute: typeof rootRoute
+    }
     '/c/$chatId': {
       id: '/c/$chatId'
       path: '/c/$chatId'
@@ -68,12 +82,14 @@ declare module '@tanstack/react-router' {
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/settings': typeof SettingsRoute
+  '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
 
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/settings': typeof SettingsRoute
+  '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
 
@@ -81,27 +97,30 @@ export interface FileRoutesById {
   __root__: typeof rootRoute
   '/': typeof IndexRoute
   '/settings': typeof SettingsRoute
+  '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
 }
 
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/settings' | '/c/$chatId'
+  fullPaths: '/' | '/settings' | '/workflows' | '/c/$chatId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/settings' | '/c/$chatId'
-  id: '__root__' | '/' | '/settings' | '/c/$chatId'
+  to: '/' | '/settings' | '/workflows' | '/c/$chatId'
+  id: '__root__' | '/' | '/settings' | '/workflows' | '/c/$chatId'
   fileRoutesById: FileRoutesById
 }
 
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   SettingsRoute: typeof SettingsRoute
+  WorkflowsRoute: typeof WorkflowsRoute
   CChatIdRoute: typeof CChatIdRoute
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   SettingsRoute: SettingsRoute,
+  WorkflowsRoute: WorkflowsRoute,
   CChatIdRoute: CChatIdRoute,
 }
 
@@ -117,6 +136,7 @@ export const routeTree = rootRoute
       "children": [
         "/",
         "/settings",
+        "/workflows",
         "/c/$chatId"
       ]
     },
@@ -125,6 +145,9 @@ export const routeTree = rootRoute
     },
     "/settings": {
       "filePath": "settings.tsx"
+    },
+    "/workflows": {
+      "filePath": "workflows.tsx"
     },
     "/c/$chatId": {
       "filePath": "c.$chatId.tsx"

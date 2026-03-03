@@ -241,6 +241,7 @@ export const useSendMessage = (chatId: string) => {
       fileTools,
       forceUpdate,
       think,
+      runtimeOptions,
       onChatEvent,
     }: {
       message: string;
@@ -250,6 +251,17 @@ export const useSendMessage = (chatId: string) => {
       fileTools?: boolean;
       forceUpdate?: boolean;
       think?: boolean | string;
+      runtimeOptions?: {
+        browserControlEnabled?: boolean;
+        runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeCDPURL?: string;
+        runtimeTabIndex?: number;
+        runtimeTabMatch?: string;
+        runtimeTabPolicy?: "pinned" | "ask" | "active";
+        runtimeMaxSteps?: number;
+        providerRoute?: "local_ollama" | "ollama_cloud" | "kimi" | "openrouter";
+        providerModel?: string;
+      };
       onChatEvent?: (event: ChatEventUnion) => void;
     }) => {
       // For existing chats, set streaming state and add optimistic user message
@@ -326,6 +338,7 @@ export const useSendMessage = (chatId: string) => {
         fileTools,
         forceUpdate,
         think,
+        runtimeOptions,
       );
       let currentChatId = chatId;
       let isCancelled = false;
@@ -661,10 +674,9 @@ export const useSendMessage = (chatId: string) => {
               newMap.delete(currentChatId);
               return newMap;
             });
-            // Ensure chat is fresh for next fetch
-            queryClient.invalidateQueries({
-              queryKey: ["chat", currentChatId],
-            });
+            // Keep streamed tool telemetry visible after completion.
+            // We avoid eager refetch here because server snapshots can lag
+            // and collapse in-flight runtime trace visibility.
             break;
           case "chat_created": {
             if (!event.chatId) break;

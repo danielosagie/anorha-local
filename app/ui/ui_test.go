@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,9 +16,32 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ollama/ollama/app/agentruntime"
 	"github.com/ollama/ollama/app/store"
+	"github.com/ollama/ollama/app/tools"
+	"github.com/ollama/ollama/app/ui/responses"
 	"github.com/ollama/ollama/app/updater"
 )
+
+func decodeJSONL(raw string) ([]map[string]any, error) {
+	out := []map[string]any{}
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func TestHandlePostApiSettings(t *testing.T) {
 	tests := []struct {
@@ -550,6 +574,80 @@ func TestSupportsBrowserTools(t *testing.T) {
 	}
 }
 
+func TestIsLegacyBrowserTool(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "browser.search", want: true},
+		{name: "browser.open", want: true},
+		{name: "browser.find", want: true},
+		{name: "browser_use", want: false},
+		{name: "browser", want: false},
+		{name: "web_search", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLegacyBrowserTool(tt.name); got != tt.want {
+				t.Fatalf("isLegacyBrowserTool(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPersistLegacyBrowserStateNilBrowserNoop(t *testing.T) {
+	server := &Server{}
+	if err := server.persistLegacyBrowserState("chat-1", "browser.search", nil); err != nil {
+		t.Fatalf("persistLegacyBrowserState() error = %v, want nil", err)
+	}
+}
+
+func TestPersistLegacyBrowserStateWritesState(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	chat := store.NewChat("chat-persist-browser-state")
+	if err := testStore.SetChat(*chat); err != nil {
+		t.Fatalf("SetChat() error = %v", err)
+	}
+
+	browserState := &responses.BrowserStateData{
+		PageStack:  []string{"https://example.com"},
+		ViewTokens: tools.DefaultViewTokens,
+		URLToPage: map[string]*responses.Page{
+			"https://example.com": {
+				URL:   "https://example.com",
+				Title: "Example",
+				Text:  "example text",
+			},
+		},
+	}
+
+	server := &Server{Store: testStore}
+	if err := server.persistLegacyBrowserState(chat.ID, "browser.open", tools.NewBrowser(browserState)); err != nil {
+		t.Fatalf("persistLegacyBrowserState() error = %v", err)
+	}
+
+	updatedChat, err := testStore.Chat(chat.ID)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(updatedChat.BrowserState) == 0 {
+		t.Fatal("BrowserState should be persisted but was empty")
+	}
+
+	var persisted responses.BrowserStateData
+	if err := json.Unmarshal(updatedChat.BrowserState, &persisted); err != nil {
+		t.Fatalf("unmarshal BrowserState error = %v", err)
+	}
+	if len(persisted.PageStack) != 1 || persisted.PageStack[0] != "https://example.com" {
+		t.Fatalf("unexpected persisted PageStack: %#v", persisted.PageStack)
+	}
+}
+
 func TestWebSearchToolRegistration(t *testing.T) {
 	// Validates that the capability-gating logic in chat() correctly
 	// decides which tools to register based on model capabilities and
@@ -630,6 +728,249 @@ func TestWebSearchToolRegistration(t *testing.T) {
 				t.Error("unexpected web search tools registered")
 			}
 		})
+	}
+}
+
+func TestChatBrowserControlWithOpenRouterReturnsRuntimeUnavailable(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	server := &Server{
+		Store: testStore,
+	}
+
+	body := `{"model":"openrouter/openai/gpt-4o-mini","prompt":"hi","browserControlEnabled":true}`
+	req := httptest.NewRequest("POST", "/api/v1/chat/new", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", "new")
+	rr := httptest.NewRecorder()
+
+	if err := server.chat(rr, req); err != nil {
+		t.Fatalf("chat() error = %v", err)
+	}
+
+	events, err := decodeJSONL(rr.Body.String())
+	if err != nil {
+		t.Fatalf("failed to parse chat stream: %v", err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("expected at least 3 events, got %d: %s", len(events), rr.Body.String())
+	}
+	if events[1]["eventName"] != "error" {
+		t.Fatalf("second event should be error, got %v", events[1]["eventName"])
+	}
+	if events[1]["code"] != "browser_runtime_unavailable" {
+		t.Fatalf("error code = %v, want browser_runtime_unavailable", events[1]["code"])
+	}
+	last := events[len(events)-1]
+	if last["eventName"] != "done" {
+		t.Fatalf("last event should be done, got %v", last["eventName"])
+	}
+}
+
+func TestChatBrowserControlWithOllamaCloudReturnsRuntimeUnavailable(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	server := &Server{
+		Store: testStore,
+	}
+
+	body := `{"model":"kimi-k2.5:cloud","providerRoute":"ollama_cloud","prompt":"hi","browserControlEnabled":true}`
+	req := httptest.NewRequest("POST", "/api/v1/chat/new", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", "new")
+	rr := httptest.NewRecorder()
+
+	if err := server.chat(rr, req); err != nil {
+		t.Fatalf("chat() error = %v", err)
+	}
+
+	events, err := decodeJSONL(rr.Body.String())
+	if err != nil {
+		t.Fatalf("failed to parse chat stream: %v", err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("expected at least 3 events, got %d: %s", len(events), rr.Body.String())
+	}
+	if events[1]["eventName"] != "error" {
+		t.Fatalf("second event should be error, got %v", events[1]["eventName"])
+	}
+	if events[1]["code"] != "browser_runtime_unavailable" {
+		t.Fatalf("error code = %v, want browser_runtime_unavailable", events[1]["code"])
+	}
+	last := events[len(events)-1]
+	if last["eventName"] != "done" {
+		t.Fatalf("last event should be done, got %v", last["eventName"])
+	}
+}
+
+func TestChatBrowserControlRuntimeOverridesPassedToSidecar(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	var gotOptions agentruntime.RuntimeOptions
+	var haveOptions atomic.Bool
+
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"healthy":true}`))
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/options":
+			var payload struct {
+				ThreadID string                      `json:"threadId"`
+				Options  agentruntime.RuntimeOptions `json:"options"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode options payload: %v", err)
+			}
+			gotOptions = payload.Options
+			haveOptions.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"options": payload.Options,
+			})
+			return
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/events/"):
+			w.Header().Set("Content-Type", "text/event-stream")
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/run":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"summary": "ok",
+			})
+			return
+		default:
+			http.NotFound(w, r)
+			return
+		}
+	}))
+	defer sidecar.Close()
+
+	server := &Server{
+		Store:        testStore,
+		AgentRuntime: agentruntime.NewClient(sidecar.URL),
+	}
+
+	body := `{"model":"kimi-k2.5:cloud","providerRoute":"ollama_cloud","prompt":"open marketplace","browserControlEnabled":true,"runtimeBackend":"playwright_attached","runtimeCDPURL":"http://127.0.0.1:9222","runtimeTabIndex":2,"runtimeTabMatch":"facebook.com","runtimeTabPolicy":"pinned","runtimeMaxSteps":9}`
+	req := httptest.NewRequest("POST", "/api/v1/chat/new", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", "new")
+	rr := httptest.NewRecorder()
+
+	if err := server.chat(rr, req); err != nil {
+		t.Fatalf("chat() error = %v", err)
+	}
+	if !haveOptions.Load() {
+		t.Fatalf("expected runtime options to be sent to sidecar")
+	}
+	if gotOptions.RuntimeBackend != agentruntime.RuntimeBackendAttached {
+		t.Fatalf("runtime backend = %q", gotOptions.RuntimeBackend)
+	}
+	if gotOptions.RuntimeCDPURL != "http://127.0.0.1:9222" {
+		t.Fatalf("runtime cdp url = %q", gotOptions.RuntimeCDPURL)
+	}
+	if gotOptions.RuntimeTabIndex != 2 {
+		t.Fatalf("runtime tab index = %d", gotOptions.RuntimeTabIndex)
+	}
+	if gotOptions.RuntimeTabMatch != "facebook.com" {
+		t.Fatalf("runtime tab match = %q", gotOptions.RuntimeTabMatch)
+	}
+	if gotOptions.RuntimeTabPolicy != "pinned" {
+		t.Fatalf("runtime tab policy = %q", gotOptions.RuntimeTabPolicy)
+	}
+	if gotOptions.RuntimeMaxSteps != 9 {
+		t.Fatalf("runtime max steps = %d", gotOptions.RuntimeMaxSteps)
+	}
+}
+
+func TestResolveRuntimeBackendPrecedence(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	server := &Server{Store: testStore}
+
+	settings, err := testStore.Settings()
+	if err != nil {
+		t.Fatalf("settings() error: %v", err)
+	}
+	settings.RuntimeBackend = string(agentruntime.RuntimeBackendPlaywright)
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatalf("set settings: %v", err)
+	}
+
+	t.Setenv("ANORHA_RUNTIME_BACKEND", "browser_use_ts")
+	if got := server.resolveRuntimeBackend("playwright_attached"); got != agentruntime.RuntimeBackendAttached {
+		t.Fatalf("request override backend = %q", got)
+	}
+	if got := server.resolveRuntimeBackend(""); got != agentruntime.RuntimeBackendBrowserUse {
+		t.Fatalf("env backend = %q", got)
+	}
+
+	t.Setenv("ANORHA_RUNTIME_BACKEND", "")
+	if got := server.resolveRuntimeBackend(""); got != agentruntime.RuntimeBackendPlaywright {
+		t.Fatalf("settings backend = %q", got)
+	}
+
+	settings.RuntimeBackend = string(agentruntime.RuntimeBackendBrowserUse)
+	if err := testStore.SetSettings(settings); err != nil {
+		t.Fatalf("set settings: %v", err)
+	}
+	if got := server.resolveRuntimeBackend(""); got != agentruntime.RuntimeBackendAttached {
+		t.Fatalf("attached-first default backend = %q", got)
+	}
+}
+
+func TestChatOpenRouterMissingCredentialReturnsConfigError(t *testing.T) {
+	testStore := &store.Store{
+		DBPath: filepath.Join(t.TempDir(), "db.sqlite"),
+	}
+	defer testStore.Close()
+
+	t.Setenv("OPENROUTER_API_KEY", "")
+
+	server := &Server{
+		Store: testStore,
+	}
+
+	body := `{"model":"openrouter/openai/gpt-4o-mini","prompt":"hi"}`
+	req := httptest.NewRequest("POST", "/api/v1/chat/new", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", "new")
+	rr := httptest.NewRecorder()
+
+	if err := server.chat(rr, req); err != nil {
+		t.Fatalf("chat() error = %v", err)
+	}
+
+	events, err := decodeJSONL(rr.Body.String())
+	if err != nil {
+		t.Fatalf("failed to parse chat stream: %v", err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("expected at least 3 events, got %d: %s", len(events), rr.Body.String())
+	}
+	if events[1]["eventName"] != "error" {
+		t.Fatalf("second event should be error, got %v", events[1]["eventName"])
+	}
+	if events[1]["code"] != "openrouter_auth_missing" {
+		t.Fatalf("error code = %v, want openrouter_auth_missing", events[1]["code"])
+	}
+	last := events[len(events)-1]
+	if last["eventName"] != "done" {
+		t.Fatalf("last event should be done, got %v", last["eventName"])
 	}
 }
 

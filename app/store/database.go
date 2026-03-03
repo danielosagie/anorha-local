@@ -14,7 +14,7 @@ import (
 
 // currentSchemaVersion defines the current database schema version.
 // Increment this when making schema changes that require migrations.
-const currentSchemaVersion = 15
+const currentSchemaVersion = 19
 
 // database wraps the SQLite connection.
 // SQLite handles its own locking for concurrent access:
@@ -81,12 +81,19 @@ func (db *database) init() error {
 		turbo_enabled BOOLEAN NOT NULL DEFAULT 0,
 		websearch_enabled BOOLEAN NOT NULL DEFAULT 0,
 		selected_model TEXT NOT NULL DEFAULT '',
-		sidebar_open BOOLEAN NOT NULL DEFAULT 0,
+		sidebar_open BOOLEAN NOT NULL DEFAULT 1,
 		think_enabled BOOLEAN NOT NULL DEFAULT 0,
 		think_level TEXT NOT NULL DEFAULT '',
 		cloud_setting_migrated BOOLEAN NOT NULL DEFAULT 0,
 		remote TEXT NOT NULL DEFAULT '', -- deprecated
 		auto_update_enabled BOOLEAN NOT NULL DEFAULT 1,
+		browser_control_enabled BOOLEAN NOT NULL DEFAULT 1,
+		runtime_backend TEXT NOT NULL DEFAULT 'browser_use_ts',
+		headless_default BOOLEAN NOT NULL DEFAULT 0,
+		recording_enabled BOOLEAN NOT NULL DEFAULT 1,
+		control_border_enabled BOOLEAN NOT NULL DEFAULT 1,
+		provider_route_default TEXT NOT NULL DEFAULT 'local_ollama',
+		provider_model_default TEXT NOT NULL DEFAULT '',
 		schema_version INTEGER NOT NULL DEFAULT %d
 	);
 
@@ -264,6 +271,30 @@ func (db *database) migrate() error {
 				return fmt.Errorf("migrate v14 to v15: %w", err)
 			}
 			version = 15
+		case 15:
+			// add runtime-specific defaults for sidecar orchestration
+			if err := db.migrateV15ToV16(); err != nil {
+				return fmt.Errorf("migrate v15 to v16: %w", err)
+			}
+			version = 16
+		case 16:
+			// reset browser control default back to off for baseline chat behavior
+			if err := db.migrateV16ToV17(); err != nil {
+				return fmt.Errorf("migrate v16 to v17: %w", err)
+			}
+			version = 17
+		case 17:
+			// restore sidebar to visible-by-default so chat threads remain accessible
+			if err := db.migrateV17ToV18(); err != nil {
+				return fmt.Errorf("migrate v17 to v18: %w", err)
+			}
+			version = 18
+		case 18:
+			// enable browser control by default
+			if err := db.migrateV18ToV19(); err != nil {
+				return fmt.Errorf("migrate v18 to v19: %w", err)
+			}
+			version = 19
 		default:
 			// If we have a version we don't recognize, just set it to current
 			// This might happen during development
@@ -362,7 +393,7 @@ func (db *database) migrateV5ToV6() error {
 		return fmt.Errorf("add selected_model column: %w", err)
 	}
 
-	_, err = db.conn.Exec(`ALTER TABLE settings ADD COLUMN sidebar_open BOOLEAN NOT NULL DEFAULT 0;`)
+	_, err = db.conn.Exec(`ALTER TABLE settings ADD COLUMN sidebar_open BOOLEAN NOT NULL DEFAULT 1;`)
 	if err != nil && !duplicateColumnError(err) {
 		return fmt.Errorf("add sidebar_open column: %w", err)
 	}
@@ -515,6 +546,71 @@ func (db *database) migrateV14ToV15() error {
 		return fmt.Errorf("update schema version: %w", err)
 	}
 
+	return nil
+}
+
+// migrateV15ToV16 adds runtime-sidecar settings columns.
+func (db *database) migrateV15ToV16() error {
+	queries := []string{
+		`ALTER TABLE settings ADD COLUMN browser_control_enabled BOOLEAN NOT NULL DEFAULT 1`,
+		`ALTER TABLE settings ADD COLUMN runtime_backend TEXT NOT NULL DEFAULT 'browser_use_ts'`,
+		`ALTER TABLE settings ADD COLUMN headless_default BOOLEAN NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN recording_enabled BOOLEAN NOT NULL DEFAULT 1`,
+		`ALTER TABLE settings ADD COLUMN control_border_enabled BOOLEAN NOT NULL DEFAULT 1`,
+		`ALTER TABLE settings ADD COLUMN provider_route_default TEXT NOT NULL DEFAULT 'local_ollama'`,
+		`ALTER TABLE settings ADD COLUMN provider_model_default TEXT NOT NULL DEFAULT ''`,
+	}
+
+	for _, query := range queries {
+		if _, err := db.conn.Exec(query); err != nil && !duplicateColumnError(err) {
+			return fmt.Errorf("runtime settings migration query failed (%s): %w", query, err)
+		}
+	}
+
+	_, err := db.conn.Exec(`UPDATE settings SET schema_version = 16`)
+	if err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+
+	return nil
+}
+
+// migrateV16ToV17 resets browser control to opt-in mode and bumps schema.
+func (db *database) migrateV16ToV17() error {
+	_, err := db.conn.Exec(`
+		UPDATE settings
+		SET browser_control_enabled = 0,
+		    schema_version = 17
+	`)
+	if err != nil {
+		return fmt.Errorf("update settings for v17: %w", err)
+	}
+	return nil
+}
+
+// migrateV17ToV18 restores sidebar visibility as the default UX.
+func (db *database) migrateV17ToV18() error {
+	_, err := db.conn.Exec(`
+		UPDATE settings
+		SET sidebar_open = 1,
+		    schema_version = 18
+	`)
+	if err != nil {
+		return fmt.Errorf("update settings for v18: %w", err)
+	}
+	return nil
+}
+
+// migrateV18ToV19 enables browser control by default.
+func (db *database) migrateV18ToV19() error {
+	_, err := db.conn.Exec(`
+		UPDATE settings
+		SET browser_control_enabled = 1,
+		    schema_version = 19
+	`)
+	if err != nil {
+		return fmt.Errorf("update settings for v19: %w", err)
+	}
 	return nil
 }
 
@@ -1166,9 +1262,9 @@ func (db *database) getSettings() (Settings, error) {
 	var s Settings
 
 	err := db.conn.QueryRow(`
-		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, think_enabled, think_level, auto_update_enabled
+		SELECT expose, survey, browser, models, agent, tools, working_dir, context_length, turbo_enabled, websearch_enabled, selected_model, sidebar_open, think_enabled, think_level, auto_update_enabled, browser_control_enabled, runtime_backend, headless_default, recording_enabled, control_border_enabled, provider_route_default, provider_model_default
 		FROM settings
-	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled)
+	`).Scan(&s.Expose, &s.Survey, &s.Browser, &s.Models, &s.Agent, &s.Tools, &s.WorkingDir, &s.ContextLength, &s.TurboEnabled, &s.WebSearchEnabled, &s.SelectedModel, &s.SidebarOpen, &s.ThinkEnabled, &s.ThinkLevel, &s.AutoUpdateEnabled, &s.BrowserControlEnabled, &s.RuntimeBackend, &s.HeadlessDefault, &s.RecordingEnabled, &s.ControlBorderEnabled, &s.ProviderRouteDefault, &s.ProviderModelDefault)
 	if err != nil {
 		return Settings{}, fmt.Errorf("get settings: %w", err)
 	}
@@ -1179,8 +1275,8 @@ func (db *database) getSettings() (Settings, error) {
 func (db *database) setSettings(s Settings) error {
 	_, err := db.conn.Exec(`
 		UPDATE settings
-		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?
-	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled)
+		SET expose = ?, survey = ?, browser = ?, models = ?, agent = ?, tools = ?, working_dir = ?, context_length = ?, turbo_enabled = ?, websearch_enabled = ?, selected_model = ?, sidebar_open = ?, think_enabled = ?, think_level = ?, auto_update_enabled = ?, browser_control_enabled = ?, runtime_backend = ?, headless_default = ?, recording_enabled = ?, control_border_enabled = ?, provider_route_default = ?, provider_model_default = ?
+	`, s.Expose, s.Survey, s.Browser, s.Models, s.Agent, s.Tools, s.WorkingDir, s.ContextLength, s.TurboEnabled, s.WebSearchEnabled, s.SelectedModel, s.SidebarOpen, s.ThinkEnabled, s.ThinkLevel, s.AutoUpdateEnabled, s.BrowserControlEnabled, s.RuntimeBackend, s.HeadlessDefault, s.RecordingEnabled, s.ControlBorderEnabled, s.ProviderRouteDefault, s.ProviderModelDefault)
 	if err != nil {
 		return fmt.Errorf("set settings: %w", err)
 	}

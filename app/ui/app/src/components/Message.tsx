@@ -15,6 +15,7 @@ const Message = React.memo(
     isFaded,
     browserToolResult,
     lastToolQuery,
+    onQuickRuntimeCommand,
   }: {
     message: MessageType;
     onEditMessage?: (content: string, index: number) => void;
@@ -24,6 +25,7 @@ const Message = React.memo(
     // TODO(drifkin): this type isn't right
     browserToolResult?: BrowserToolResult;
     lastToolQuery?: string;
+    onQuickRuntimeCommand?: (command: string) => void;
   }) => {
     if (message.role === "user") {
       return (
@@ -42,6 +44,7 @@ const Message = React.memo(
           isFaded={isFaded}
           browserToolResult={browserToolResult}
           lastToolQuery={lastToolQuery}
+          onQuickRuntimeCommand={onQuickRuntimeCommand}
         />
       );
     }
@@ -53,7 +56,8 @@ const Message = React.memo(
       prevProps.messageIndex === nextProps.messageIndex &&
       prevProps.isStreaming === nextProps.isStreaming &&
       prevProps.isFaded === nextProps.isFaded &&
-      prevProps.browserToolResult === nextProps.browserToolResult
+      prevProps.browserToolResult === nextProps.browserToolResult &&
+      prevProps.onQuickRuntimeCommand === nextProps.onQuickRuntimeCommand
     );
   },
 );
@@ -257,15 +261,138 @@ function ToolRoleContent({
   message,
   browserToolResult,
   lastToolQuery,
+  onQuickRuntimeCommand,
 }: {
   message: MessageType;
   browserToolResult?: BrowserToolResult;
   lastToolQuery?: string;
+  onQuickRuntimeCommand?: (command: string) => void;
 }) {
   const content = message.content;
   const rawToolResult = (message as any).tool_result;
   const toolName = (message as any).tool_name || (message as any).toolName;
   const [isCollapsed, setIsCollapsed] = useState(true);
+  const [presetCodeExpanded, setPresetCodeExpanded] = useState(false);
+  const runtimeStep = extractRuntimeStep(toolName, rawToolResult, content);
+  const workflowEvent = extractWorkflowEvent(toolName, rawToolResult, content);
+
+  if (runtimeStep) {
+    return <RuntimeStepCard step={runtimeStep} />;
+  }
+  if (workflowEvent) {
+    return <WorkflowEventCard event={workflowEvent} />;
+  }
+
+  if (toolName === "runtime.context_question") {
+    const questionData =
+      rawToolResult && typeof rawToolResult === "object" ? (rawToolResult as any) : undefined;
+    const question =
+      (questionData && typeof questionData.question === "string"
+        ? questionData.question
+        : "") || content || "Need additional context.";
+    const options: Array<{ index: number; title: string; url: string }> = Array.isArray(questionData?.options)
+      ? questionData.options
+          .map((opt: any) => ({
+            index: Number(opt?.index),
+            title: typeof opt?.title === "string" ? opt.title : "",
+            url: typeof opt?.url === "string" ? opt.url : "",
+          }))
+          .filter((opt: { index: number; title: string; url: string }) => Number.isFinite(opt.index) && opt.index > 0)
+      : [];
+    return (
+      <div className="rounded-lg border border-amber-300/70 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 p-3 text-sm text-amber-900 dark:text-amber-100">
+        <div className="font-semibold mb-1">Question</div>
+        <div>{question}</div>
+        {options.length > 0 && (
+          <div className="mt-2 rounded-md border border-amber-300/70 dark:border-amber-700 bg-amber-100/50 dark:bg-amber-900/30 p-2">
+            <div className="text-xs uppercase tracking-wide font-semibold mb-1">Tab Options</div>
+            <div className="space-y-1 text-xs">
+              {options.slice(0, 20).map((opt: { index: number; title: string; url: string }) => (
+                <div key={`${opt.index}-${opt.url}`} className="leading-snug">
+                  <span className="font-semibold">tab {opt.index}</span>
+                  {opt.title ? ` - ${opt.title}` : ""}
+                  {opt.url ? (
+                    <div className="opacity-80 break-all">{opt.url}</div>
+                  ) : null}
+                  {onQuickRuntimeCommand ? (
+                    <button
+                      type="button"
+                      onClick={() => onQuickRuntimeCommand(`tab ${opt.index}`)}
+                      className="mt-1 inline-flex items-center rounded-md border border-amber-400/80 dark:border-amber-600 px-2 py-1 text-[11px] font-medium hover:bg-amber-200/70 dark:hover:bg-amber-900/50"
+                    >
+                      Use tab {opt.index}
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-xs opacity-80">Reply with "tab N" (example: "tab 2").</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (toolName === "runtime.login_required") {
+    return (
+      <div className="rounded-lg border border-blue-300/70 dark:border-blue-700 bg-blue-50/60 dark:bg-blue-950/30 p-3 text-sm text-blue-900 dark:text-blue-100">
+        <div className="font-semibold mb-1">Login Required</div>
+        <div>{content || "Complete login in the browser tab and reply 'continue'."}</div>
+      </div>
+    );
+  }
+
+  if (toolName === "runtime.playwright_preset") {
+    const presetData =
+      rawToolResult && typeof rawToolResult === "object" ? (rawToolResult as Record<string, unknown>) : undefined;
+    const code = typeof presetData?.code === "string" ? presetData.code : "";
+    const reusableSteps =
+      typeof presetData?.reusableSteps === "number" ? Math.trunc(presetData.reusableSteps) : undefined;
+    const failedStep = typeof presetData?.failedStep === "number" ? Math.trunc(presetData.failedStep) : undefined;
+    const failedAction = typeof presetData?.failedAction === "string" ? presetData.failedAction : "";
+    return (
+      <div className="rounded-lg border border-violet-300/70 dark:border-violet-700 bg-violet-50/60 dark:bg-violet-950/30 p-3 text-sm text-violet-900 dark:text-violet-100">
+        <div className="font-semibold mb-1">Playwright Preset</div>
+        <div>{content || "Preset state updated."}</div>
+        {typeof reusableSteps === "number" && reusableSteps > 0 && (
+          <div className="mt-1 text-xs opacity-90">Reusable steps: {reusableSteps}</div>
+        )}
+        {typeof failedStep === "number" && (
+          <div className="mt-1 text-xs opacity-90">
+            Replay failed at step {failedStep}
+            {failedAction ? ` (${failedAction})` : ""}. Planner fallback is active.
+          </div>
+        )}
+        {code ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => setPresetCodeExpanded((prev) => !prev)}
+              className="inline-flex items-center rounded-md border border-violet-400/80 dark:border-violet-600 px-2 py-1 text-[11px] font-medium hover:bg-violet-200/70 dark:hover:bg-violet-900/50"
+            >
+              {presetCodeExpanded ? "Hide preset code" : "Show preset code"}
+            </button>
+            {presetCodeExpanded && (
+              <div className="mt-2">
+                <div className="flex justify-end">
+                  <CopyButton
+                    content={code}
+                    size="sm"
+                    showLabels={false}
+                    title="Copy preset code"
+                    className="border border-violet-300/80 dark:border-violet-700 text-violet-700 dark:text-violet-200"
+                  />
+                </div>
+                <pre className="text-xs whitespace-pre-wrap overflow-x-auto bg-violet-100/70 dark:bg-violet-900/40 text-violet-900 dark:text-violet-100 p-2 rounded-md border border-violet-300/70 dark:border-violet-700">
+                  <code>{code}</code>
+                </pre>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
 
   if (browserToolResult && typeof browserToolResult === "object") {
     return (
@@ -373,6 +500,383 @@ function ToolRoleContent({
               </code>
             </pre>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+type RuntimeStepView = {
+  step: number;
+  status: "planned" | "running" | "success" | "failed" | "paused";
+  content: string;
+  action?: string;
+  error?: string;
+  missingFields?: string[];
+  itemId?: string;
+  durationMs?: number;
+};
+
+type WorkflowEventView =
+  | {
+      kind: "stage";
+      itemId?: string;
+      stage?: string;
+      status: "pending" | "running" | "success" | "failed" | "skipped";
+      attempt?: number;
+      evidence?: string;
+      error?: string;
+      missingFields?: string[];
+      durationMs?: number;
+    }
+  | {
+      kind: "item";
+      itemId?: string;
+      status: "pending" | "running" | "succeeded" | "failed" | "canceled";
+      summary?: string;
+      error?: string;
+      missingFields?: string[];
+      durationMs?: number;
+    }
+  | {
+      kind: "run";
+      status:
+        | "queued"
+        | "running"
+        | "completed"
+        | "completed_with_errors"
+        | "failed"
+        | "canceled";
+      summary?: string;
+      completed?: number;
+      total?: number;
+      failed?: number;
+      canceled?: number;
+    };
+
+function stripAnsi(value: string): string {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => String(entry || "").trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function extractRuntimeStep(
+  toolName: string | undefined,
+  rawToolResult: unknown,
+  content: string,
+): RuntimeStepView | null {
+  if (toolName !== "runtime.step" && toolName !== "runtime.step_trace") {
+    return null;
+  }
+
+  if (!rawToolResult || typeof rawToolResult !== "object") {
+    const fallbackStep = Number((/Step\s+(\d+)/i.exec(content || "") || [])[1] || 0);
+    if (!fallbackStep) return null;
+    return {
+      step: fallbackStep,
+      status: /failed/i.test(content) ? "failed" : /running/i.test(content) ? "running" : "success",
+      content: stripAnsi(content),
+    };
+  }
+
+  const obj = rawToolResult as Record<string, unknown>;
+  const step = Number(obj.step || 0);
+  if (!Number.isFinite(step) || step <= 0) return null;
+
+  let status = String(obj.status || "").toLowerCase();
+  if (
+    status !== "planned" &&
+    status !== "running" &&
+    status !== "success" &&
+    status !== "failed" &&
+    status !== "paused"
+  ) {
+    status = Boolean(obj.success) ? "success" : "running";
+  }
+
+  return {
+    step,
+    status: status as RuntimeStepView["status"],
+    content:
+      stripAnsi(
+        (typeof obj.evidence === "string" && obj.evidence) ||
+          (typeof obj.detail === "string" && obj.detail) ||
+          content ||
+          "",
+      ) || "",
+    action: typeof obj.action === "string" ? obj.action : undefined,
+    error:
+      typeof obj.error === "string" ? stripAnsi(obj.error) : undefined,
+    missingFields: asStringArray(obj.missingFields),
+    itemId:
+      typeof obj.itemId === "string" && obj.itemId
+        ? obj.itemId
+        : undefined,
+    durationMs:
+      typeof obj.durationMs === "number" && Number.isFinite(obj.durationMs)
+        ? obj.durationMs
+        : undefined,
+  };
+}
+
+function RuntimeStepCard({ step }: { step: RuntimeStepView }) {
+  const statusStyles: Record<RuntimeStepView["status"], string> = {
+    planned: "border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300",
+    running: "border-sky-300 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/30 text-sky-800 dark:text-sky-200",
+    success: "border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200",
+    failed: "border-rose-300 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200",
+    paused: "border-amber-300 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200",
+  };
+
+  return (
+    <div className={`rounded-lg border p-3 text-sm ${statusStyles[step.status]}`}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="font-semibold">Step {step.step}</span>
+        <span className="text-xs uppercase tracking-wide opacity-75">{step.status}</span>
+        {step.action && <span className="text-xs opacity-70">({step.action})</span>}
+        {step.itemId && <span className="text-xs opacity-70">item {step.itemId}</span>}
+        {typeof step.durationMs === "number" && (
+          <span className="text-xs opacity-70">{Math.max(0, Math.round(step.durationMs))}ms</span>
+        )}
+      </div>
+      {step.content && <div>{step.content}</div>}
+      {step.error && <div className="mt-1 text-xs opacity-90">{step.error}</div>}
+      {step.missingFields && step.missingFields.length > 0 && (
+        <div className="mt-2">
+          <div className="text-xs uppercase tracking-wide opacity-75">Missing fields</div>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {step.missingFields.map((field) => (
+              <span
+                key={field}
+                className="inline-flex rounded-md border border-current/30 px-2 py-0.5 text-[11px]"
+              >
+                {field}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function extractWorkflowEvent(
+  toolName: string | undefined,
+  rawToolResult: unknown,
+  content: string,
+): WorkflowEventView | null {
+  const normalizedToolName = String(toolName || "").trim();
+  const obj = rawToolResult && typeof rawToolResult === "object" ? (rawToolResult as Record<string, unknown>) : {};
+  const eventName = String(obj.eventName || "").trim();
+  const normalizedName =
+    eventName ||
+    (normalizedToolName.startsWith("workflow.runtime.")
+      ? normalizedToolName.replace(/^workflow\.runtime\./, "")
+      : normalizedToolName);
+
+  if (normalizedName === "workflow_stage") {
+    const status = String(obj.status || "running").toLowerCase();
+    return {
+      kind: "stage",
+      itemId: typeof obj.itemId === "string" ? obj.itemId : undefined,
+      stage: typeof obj.stage === "string" ? obj.stage : undefined,
+      status:
+        status === "pending" ||
+        status === "running" ||
+        status === "success" ||
+        status === "failed" ||
+        status === "skipped"
+          ? status
+          : "running",
+      attempt: typeof obj.attempt === "number" ? Math.trunc(obj.attempt) : undefined,
+      evidence:
+        typeof obj.evidence === "string"
+          ? stripAnsi(obj.evidence)
+          : content
+            ? stripAnsi(content)
+            : undefined,
+      error: typeof obj.error === "string" ? stripAnsi(obj.error) : undefined,
+      missingFields: asStringArray(obj.missingFields),
+      durationMs:
+        typeof obj.durationMs === "number" && Number.isFinite(obj.durationMs)
+          ? obj.durationMs
+          : undefined,
+    };
+  }
+
+  if (normalizedName === "workflow_item_result") {
+    const status = String(obj.status || "failed").toLowerCase();
+    return {
+      kind: "item",
+      itemId: typeof obj.itemId === "string" ? obj.itemId : undefined,
+      status:
+        status === "pending" ||
+        status === "running" ||
+        status === "succeeded" ||
+        status === "failed" ||
+        status === "canceled"
+          ? status
+          : "failed",
+      summary:
+        typeof obj.summary === "string"
+          ? stripAnsi(obj.summary)
+          : content
+            ? stripAnsi(content)
+            : undefined,
+      error: typeof obj.error === "string" ? stripAnsi(obj.error) : undefined,
+      missingFields: asStringArray(obj.missingFields),
+      durationMs:
+        typeof obj.durationMs === "number" && Number.isFinite(obj.durationMs)
+          ? obj.durationMs
+          : undefined,
+    };
+  }
+
+  if (normalizedName === "workflow_run") {
+    const status = String(obj.status || "running").toLowerCase();
+    return {
+      kind: "run",
+      status:
+        status === "queued" ||
+        status === "running" ||
+        status === "completed" ||
+        status === "completed_with_errors" ||
+        status === "failed" ||
+        status === "canceled"
+          ? status
+          : "running",
+      summary:
+        typeof obj.summary === "string"
+          ? stripAnsi(obj.summary)
+          : content
+            ? stripAnsi(content)
+            : undefined,
+      completed:
+        typeof obj.completed === "number" ? Math.trunc(obj.completed) : undefined,
+      total: typeof obj.total === "number" ? Math.trunc(obj.total) : undefined,
+      failed: typeof obj.failed === "number" ? Math.trunc(obj.failed) : undefined,
+      canceled:
+        typeof obj.canceled === "number" ? Math.trunc(obj.canceled) : undefined,
+    };
+  }
+
+  return null;
+}
+
+function WorkflowEventCard({ event }: { event: WorkflowEventView }) {
+  if (event.kind === "stage") {
+    const statusStyles: Record<
+      "pending" | "running" | "success" | "failed" | "skipped",
+      string
+    > = {
+      pending:
+        "border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300",
+      running:
+        "border-sky-300 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/30 text-sky-800 dark:text-sky-200",
+      success:
+        "border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200",
+      failed:
+        "border-rose-300 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200",
+      skipped:
+        "border-amber-300 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200",
+    };
+
+    return (
+      <div className={`rounded-lg border p-3 text-sm ${statusStyles[event.status]}`}>
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <span className="font-semibold">
+            {event.stage ? `Stage: ${event.stage}` : "Workflow stage"}
+          </span>
+          <span className="text-xs uppercase tracking-wide opacity-75">
+            {event.status}
+          </span>
+          {typeof event.attempt === "number" && (
+            <span className="text-xs opacity-70">attempt {event.attempt}</span>
+          )}
+          {event.itemId && <span className="text-xs opacity-70">item {event.itemId}</span>}
+        </div>
+        {event.evidence && <div>{event.evidence}</div>}
+        {event.error && <div className="mt-1 text-xs opacity-90">{event.error}</div>}
+        {event.missingFields && event.missingFields.length > 0 && (
+          <div className="mt-2">
+            <div className="text-xs uppercase tracking-wide opacity-75">Missing fields</div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {event.missingFields.map((field) => (
+                <span
+                  key={field}
+                  className="inline-flex rounded-md border border-current/30 px-2 py-0.5 text-[11px]"
+                >
+                  {field}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (event.kind === "item") {
+    const isSuccess = event.status === "succeeded";
+    const cardStyle = isSuccess
+      ? "border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200"
+      : event.status === "running"
+        ? "border-sky-300 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/30 text-sky-800 dark:text-sky-200"
+        : "border-rose-300 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200";
+    return (
+      <div className={`rounded-lg border p-3 text-sm ${cardStyle}`}>
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <span className="font-semibold">Item Result</span>
+          <span className="text-xs uppercase tracking-wide opacity-75">{event.status}</span>
+          {event.itemId && <span className="text-xs opacity-70">item {event.itemId}</span>}
+          {typeof event.durationMs === "number" && (
+            <span className="text-xs opacity-70">{Math.max(0, Math.round(event.durationMs))}ms</span>
+          )}
+        </div>
+        {event.summary && <div>{event.summary}</div>}
+        {event.error && <div className="mt-1 text-xs opacity-90">{event.error}</div>}
+        {event.missingFields && event.missingFields.length > 0 && (
+          <div className="mt-2">
+            <div className="text-xs uppercase tracking-wide opacity-75">Missing fields</div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {event.missingFields.map((field) => (
+                <span
+                  key={field}
+                  className="inline-flex rounded-md border border-current/30 px-2 py-0.5 text-[11px]"
+                >
+                  {field}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const runStyle =
+    event.status === "completed"
+      ? "border-emerald-300 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200"
+      : event.status === "running" || event.status === "queued"
+        ? "border-sky-300 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-950/30 text-sky-800 dark:text-sky-200"
+        : "border-rose-300 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-950/30 text-rose-800 dark:text-rose-200";
+  return (
+    <div className={`rounded-lg border p-3 text-sm ${runStyle}`}>
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <span className="font-semibold">Workflow Run</span>
+        <span className="text-xs uppercase tracking-wide opacity-75">{event.status}</span>
+      </div>
+      {event.summary && <div>{event.summary}</div>}
+      {typeof event.completed === "number" && typeof event.total === "number" && (
+        <div className="mt-1 text-xs opacity-90">
+          Progress: {event.completed}/{event.total}
+          {typeof event.failed === "number" ? `, failed: ${event.failed}` : ""}
+          {typeof event.canceled === "number" ? `, canceled: ${event.canceled}` : ""}
         </div>
       )}
     </div>
@@ -880,6 +1384,7 @@ function OtherRoleMessage({
   isFaded,
   browserToolResult,
   lastToolQuery,
+  onQuickRuntimeCommand,
 }: {
   message: MessageType;
   previousMessage?: MessageType;
@@ -888,6 +1393,7 @@ function OtherRoleMessage({
   // TODO(drifkin): this type isn't right
   browserToolResult?: BrowserToolResult;
   lastToolQuery?: string;
+  onQuickRuntimeCommand?: (command: string) => void;
 }) {
   const messageRef = useRef<HTMLDivElement>(null);
 
@@ -935,6 +1441,7 @@ function OtherRoleMessage({
                   message={message}
                   browserToolResult={browserToolResult}
                   lastToolQuery={lastToolQuery}
+                  onQuickRuntimeCommand={onQuickRuntimeCommand}
                 />
               ) : (
                 <StreamingMarkdownContent

@@ -14,6 +14,7 @@ export default function MessageList({
   editingMessageIndex,
   error,
   browserToolResult,
+  onQuickRuntimeCommand,
 }: {
   messages: MessageType[];
   spacerHeight: number;
@@ -24,6 +25,7 @@ export default function MessageList({
   editingMessageIndex?: number;
   error?: ErrorEvent | null;
   browserToolResult?: any;
+  onQuickRuntimeCommand?: (command: string) => void;
 }) {
   const [showDots, setShowDots] = React.useState(false);
   const isDownloadingModel = downloadProgress && !downloadProgress.done;
@@ -101,6 +103,7 @@ export default function MessageList({
               }
               browserToolResult={browserToolResult}
               lastToolQuery={lastToolQuery}
+              onQuickRuntimeCommand={onQuickRuntimeCommand}
             />
           </div>
         );
