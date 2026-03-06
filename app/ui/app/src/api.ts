@@ -29,6 +29,11 @@ export const APP_AUTH_SIGNIN_URL: string = (
 )
   .toString()
   .trim();
+export const APP_AUTH_SIGNUP_URL: string = (
+  (import.meta as any)?.env?.VITE_ANORHA_AUTH_SIGNUP_URL || ""
+)
+  .toString()
+  .trim();
 
 // Extend Model class with utility methods
 declare module "@/gotypes" {
@@ -84,11 +89,7 @@ export async function fetchUser(): Promise<User | null> {
   throw new Error(`Failed to fetch user: ${response.status}`);
 }
 
-export async function fetchConnectUrl(): Promise<string> {
-  if (APP_AUTH_PROVIDER === "clerk" && APP_AUTH_SIGNIN_URL) {
-    return APP_AUTH_SIGNIN_URL;
-  }
-
+export async function fetchOllamaConnectUrl(): Promise<string> {
   const response = await fetch(`${API_BASE}/api/me`, {
     method: "POST",
     headers: {
@@ -107,10 +108,6 @@ export async function fetchConnectUrl(): Promise<string> {
 }
 
 export async function disconnectUser(): Promise<void> {
-  if (APP_AUTH_PROVIDER === "clerk") {
-    return;
-  }
-
   const response = await fetch(`${API_BASE}/api/signout`, {
     method: "POST",
     headers: {
@@ -118,7 +115,7 @@ export async function disconnectUser(): Promise<void> {
     },
   });
 
-  if (!response.ok) {
+  if (!response.ok && response.status !== 401 && response.status !== 403) {
     throw new Error("Failed to disconnect user");
   }
 }
@@ -276,6 +273,7 @@ export type ChatEventUnion = ChatEvent | DownloadEvent | ErrorEvent;
 export interface RuntimeRequestOptions {
   browserControlEnabled?: boolean;
   runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+  runtimeSpeed?: "fast" | "human";
   runtimeCDPURL?: string;
   runtimeTabIndex?: number;
   runtimeTabMatch?: string;
@@ -526,6 +524,9 @@ export async function* sendMessage(
           : {}),
         ...(runtimeOptions?.runtimeBackend
           ? { runtimeBackend: runtimeOptions.runtimeBackend }
+          : {}),
+        ...(runtimeOptions?.runtimeSpeed
+          ? { runtimeSpeed: runtimeOptions.runtimeSpeed }
           : {}),
         ...(runtimeOptions?.runtimeCDPURL
           ? { runtimeCDPURL: runtimeOptions.runtimeCDPURL }

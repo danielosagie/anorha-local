@@ -1,5 +1,9 @@
 #!/bin/sh
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
 # Note: 
 #  While testing, if you double-click on the Ollama.app 
 #  some state is left on MacOS and subsequent attempts
@@ -21,6 +25,45 @@ export CGO_LDFLAGS="-mmacosx-version-min=14.0"
 set -e
 
 status() { echo >&2 ">>> $@"; }
+copy_tree_if_exists() {
+    SRC="$1"
+    DEST="$2"
+    if [ -e "$SRC" ]; then
+        mkdir -p "$DEST"
+        cp -a "$SRC" "$DEST"
+    fi
+}
+
+bundle_agent_runtime_resources() {
+    RESOURCES_DIR="$1"
+    status "Bundling agent runtime resources into macOS app"
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "npm is not installed. Please install Node.js and npm first:"
+        echo "   Visit: https://nodejs.org/"
+        exit 1
+    fi
+
+    if [ ! -d app/agent-runtime/node_modules ]; then
+        (cd app/agent-runtime && npm install)
+    fi
+    (cd app/agent-runtime && npm run build)
+    ./scripts/prepare_browser_use_runtime.sh dist/browser-use-runtime dist/browser-use-browsers
+
+    mkdir -p "$RESOURCES_DIR/agent-runtime"
+    rm -rf "$RESOURCES_DIR/agent-runtime/dist"
+    copy_tree_if_exists "app/agent-runtime/dist" "$RESOURCES_DIR/agent-runtime"
+    copy_tree_if_exists "app/agent-runtime/node_modules" "$RESOURCES_DIR/agent-runtime"
+    copy_tree_if_exists "dist/browser-use-runtime" "$RESOURCES_DIR/"
+    copy_tree_if_exists "dist/browser-use-browsers" "$RESOURCES_DIR/"
+
+    NODE_BIN="$(command -v node)"
+    if [ -n "$NODE_BIN" ] && [ -f "$NODE_BIN" ]; then
+        cp "$NODE_BIN" "$RESOURCES_DIR/node"
+        chmod a+x "$RESOURCES_DIR/node"
+    fi
+}
+
 usage() {
     echo "usage: $(basename $0) [build app [sign]]"
     exit 1
@@ -111,15 +154,17 @@ _build_macapp() {
         exit 1
     fi
 
-    if ! command -v tsc &> /dev/null; then
-        echo "Installing TypeScript compiler..."
-        npm install -g typescript
+    if [ ! -x app/ui/app/node_modules/.bin/tsc ] && ! command -v tsc >/dev/null 2>&1; then
+        echo "TypeScript compiler is unavailable. Run 'npm install' in app/ui/app first." >&2
+        exit 1
     fi
 
     echo "Installing required Go tools..."
 
     cd app/ui/app
-    npm install
+    if [ ! -d node_modules ]; then
+        npm install
+    fi
     npm run build
     cd ../../..
 
@@ -130,7 +175,7 @@ _build_macapp() {
     # update the modified date of the app bundle to now
     touch dist/Ollama.app
 
-    go clean -cache
+    go clean -cache || true
     GOARCH=amd64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-amd64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
     GOARCH=arm64 CGO_ENABLED=1 GOOS=darwin go build -o dist/darwin-app-arm64 -ldflags="-s -w -X=github.com/ollama/ollama/app/version.Version=${VERSION}" ./app/cmd/app
     mkdir -p dist/Ollama.app/Contents/MacOS
@@ -152,6 +197,7 @@ _build_macapp() {
 
     # Setup the ollama binaries
     mkdir -p dist/Ollama.app/Contents/Resources
+    bundle_agent_runtime_resources "dist/Ollama.app/Contents/Resources"
     if [ -d dist/darwin-amd64 ]; then
         lipo -create -output dist/Ollama.app/Contents/Resources/ollama dist/darwin-amd64/ollama dist/darwin-arm64/ollama
         for F in dist/darwin-amd64/lib/ollama/*mlx*.dylib ; do
@@ -170,6 +216,9 @@ _build_macapp() {
     # Sign
     if [ -n "$APPLE_IDENTITY" ]; then
         codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/ollama
+        if [ -f dist/Ollama.app/Contents/Resources/node ]; then
+            codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime dist/Ollama.app/Contents/Resources/node
+        fi
         for lib in dist/Ollama.app/Contents/Resources/*.so dist/Ollama.app/Contents/Resources/*.dylib dist/Ollama.app/Contents/Resources/*.metallib ; do
             codesign -f --timestamp -s "$APPLE_IDENTITY" --identifier ai.ollama.ollama --options=runtime ${lib}
         done

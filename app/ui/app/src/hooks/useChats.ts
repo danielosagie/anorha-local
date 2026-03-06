@@ -254,6 +254,7 @@ export const useSendMessage = (chatId: string) => {
       runtimeOptions?: {
         browserControlEnabled?: boolean;
         runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeSpeed?: "fast" | "human";
         runtimeCDPURL?: string;
         runtimeTabIndex?: number;
         runtimeTabMatch?: string;
@@ -454,8 +455,11 @@ export const useSendMessage = (chatId: string) => {
 
               // Update the last message with new thinking content
               if (lastMessage) {
-                const updatedThinking =
-                  (lastMessage.thinking || "") + (event.thinking || "");
+                const nextThinkingChunk = event.thinking || "";
+                const currentThinking = lastMessage.thinking || "";
+                const updatedThinking = currentThinking.includes(nextThinkingChunk)
+                  ? currentThinking
+                  : currentThinking + nextThinkingChunk;
                 const updatedMessage = new Message({
                   ...lastMessage,
                   thinking: updatedThinking,
@@ -564,6 +568,10 @@ export const useSendMessage = (chatId: string) => {
           }
           case "tool_result": {
             // Handle tool result events
+            const runtimeToolName = (event as any).toolName || "";
+            if (runtimeToolName === "runtime.trace") {
+              break;
+            }
             queryClient.setQueryData(
               ["chat", currentChatId],
               (old: { chat: Chat } | undefined) => {

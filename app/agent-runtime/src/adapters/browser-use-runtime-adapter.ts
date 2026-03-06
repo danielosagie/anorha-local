@@ -4,6 +4,12 @@ import type {
   RuntimeExecutionRequest,
   RuntimeExecutionResult,
 } from "../types.js";
+import {
+  resolveBrowserUseLaunchSpec,
+  resolveBrowserUseSelection,
+  type BrowserUseHealth,
+  type BrowserUseLLMSelection,
+} from "../browser-use-launcher.js";
 import { BrowserUseMcpClient } from "./browser-use-mcp-client.js";
 
 interface BrowserUseRunResponse {
@@ -26,6 +32,8 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
   private readonly mode: BrowserUseMode;
   private mcpClient: BrowserUseMcpClient | null = null;
   private mcpClientKey = "";
+  private lastStatusMessage = "";
+  private lastStatusAt = 0;
 
   constructor(baseUrl?: string) {
     this.baseUrl = (baseUrl || process.env.BROWSER_USE_BASE_URL || "http://127.0.0.1:9999").replace(/\/$/, "");
@@ -33,35 +41,43 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
   }
 
   async execute(request: RuntimeExecutionRequest): Promise<RuntimeExecutionResult> {
-    const mode = this.mode;
-    if (mode === "http") {
-      return this.tryHTTPService(request);
-    }
-
-    if (mode === "mcp") {
-      return this.tryMCP(request);
-    }
-
     try {
-      return await this.tryMCP(request);
-    } catch (mcpError) {
-      try {
+      const mode = this.mode;
+      if (mode === "http") {
         return await this.tryHTTPService(request);
-      } catch (httpError) {
-        throw new Error(
-          `Browser-Use runtime failed in auto mode. MCP: ${this.stringifyError(mcpError)} HTTP: ${this.stringifyError(httpError)}`,
-        );
       }
+
+      if (mode === "mcp") {
+        return await this.tryMCP(request);
+      }
+
+      try {
+        return await this.tryMCP(request);
+      } catch (mcpError) {
+        try {
+          return await this.tryHTTPService(request);
+        } catch (httpError) {
+          throw new Error(
+            `Browser-Use runtime failed in auto mode. MCP: ${this.stringifyError(mcpError)} HTTP: ${this.stringifyError(httpError)}`,
+          );
+        }
+      }
+    } catch (error) {
+      return this.buildFailureResult(request, error);
     }
   }
 
   private async tryMCP(request: RuntimeExecutionRequest): Promise<RuntimeExecutionResult> {
+    const selection = resolveBrowserUseSelection(request);
+    const launchSpec = resolveBrowserUseLaunchSpec(selection);
     const credentialHint = this.browserUseCredentialHint(request);
     if (credentialHint) {
       throw new Error(credentialHint);
     }
 
-    const client = await this.getMcpClient(request);
+    const runtimeSpeed = this.resolveRuntimeSpeed(request);
+    const taskPrompt = this.applyRuntimeSpeedDirective(request.message, runtimeSpeed);
+    const client = await this.getMcpClient(launchSpec.command, selection.env);
     const metadata: Record<string, unknown> = {
       threadId: request.threadId,
       startUrl: request.startUrl,
@@ -71,9 +87,14 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
       llm: request.options.providerModel,
       model: request.options.providerModel,
       headless: request.options.headless,
+      runtimeSpeed,
+      transport: selection.transport,
+      structuredOutputMode: selection.structuredOutputMode,
+      flashMode: selection.flashMode,
+      useThinking: selection.useThinking,
+      runtimeSource: selection.runtimeSource,
     };
 
-    let lastStatusEmit = 0;
     const totalPlanSteps = 4;
     const emitStep = (step: number, status: "planned" | "running" | "success" | "failed", detail: string, ok?: boolean) => {
       const prefix = `Step ${step}/${totalPlanSteps} [${status}]`;
@@ -94,14 +115,21 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
 
     const emitStatus = (message: string) => {
       const now = Date.now();
-      if (now-lastStatusEmit < 400 && message.length < 160) {
+      const normalized = String(message || "").trim();
+      if (!normalized) {
         return;
       }
-      lastStatusEmit = now;
+      const sameMessage = normalized === this.lastStatusMessage;
+      const minGapMs = sameMessage ? 20000 : 1200;
+      if (now - this.lastStatusAt < minGapMs) {
+        return;
+      }
+      this.lastStatusMessage = normalized;
+      this.lastStatusAt = now;
       request.emit({
         eventName: "thinking",
         threadId: request.threadId,
-        thinking: message.slice(0, 600),
+        thinking: normalized.slice(0, 600),
       });
     };
 
@@ -111,6 +139,7 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
     emitStep(2, "planned", `Initialize MCP session and bind selected model route (${routeLabel}, ${modelLabel}).`, true);
     emitStep(3, "planned", "Execute browser actions and collect intermediate outputs.", true);
     emitStep(4, "planned", "Summarize outcome and return structured result.", true);
+    this.emitSelectionTrace(request, selection, launchSpec.health);
 
     const contextQuestion = this.buildContextQuestion(request.message);
     if (contextQuestion) {
@@ -124,7 +153,6 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
       });
     }
 
-    let heartbeat: ReturnType<typeof setInterval> | null = null;
     try {
       emitStep(1, "running", "Analyzing task goal and constraints.");
       emitStep(1, "success", "Task goal understood.", true);
@@ -138,18 +166,14 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
       emitStep(2, "success", "MCP client session ready.", true);
 
       emitStep(3, "running", "Executing browser steps.");
-      const seenRuntimeSteps = new Set<number>();
-      heartbeat = setInterval(() => {
-        emitStatus("Browser task is still running...");
-      }, 5000);
-      const result = await client.runTask(request.message, metadata, {
+      const result = await client.runTask(taskPrompt, metadata, {
         onStatus: (message) => emitStatus(message),
         onToolCall: (name, args) => {
           request.emit({
             eventName: "tool_call",
             threadId: request.threadId,
             toolName: `browser_use.${name}`,
-            content: JSON.stringify(args).slice(0, 500),
+            content: this.summarizeToolCall(name, args),
           });
         },
         onToolResult: (name, out) => {
@@ -163,36 +187,24 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
           });
         },
         onLog: (channel, message) => {
-          const summarized = this.summarizeMcpLog(message);
-          const traceMessage = message.slice(0, 800);
-          if (summarized) {
+          const plannerStatus = this.parsePlannerStatus(message);
+          if (plannerStatus) {
             request.emit({
               eventName: "tool_result",
               threadId: request.threadId,
-              toolName: "runtime.trace",
-              toolResult: true,
-              content: `[${channel}] ${summarized}`,
-              toolResultData: { channel, message: traceMessage },
+              toolName: "runtime.browser_use_planner",
+              toolResult: Boolean(plannerStatus.plannerInitOk),
+              content:
+                `Planner provider=${String(plannerStatus.plannerProvider || selection.transport)} ` +
+                `model=${String(plannerStatus.plannerModel || selection.model || "default")} ` +
+                `init=${plannerStatus.plannerInitOk ? "ok" : "failed"}`,
+              toolResultData: plannerStatus,
             });
+            return;
           }
-
-          const stepMatch = /step\s+(\d+)/i.exec(message);
-          if (stepMatch) {
-            const stepNumber = Number(stepMatch[1]);
-            if (Number.isFinite(stepNumber) && stepNumber > 0 && !seenRuntimeSteps.has(stepNumber)) {
-              seenRuntimeSteps.add(stepNumber);
-              request.emit({
-                eventName: "tool_result",
-                threadId: request.threadId,
-                toolName: "runtime.step_trace",
-                toolResult: true,
-                content: `Observed browser step ${stepNumber}: ${message.slice(0, 260)}`,
-                toolResultData: { stepNumber, message: message.slice(0, 800), channel },
-              });
-            }
-          }
-          if (channel === "stderr" || /step|navigate|click|type|extract|tab/i.test(message)) {
-            emitStatus(`[browser-use ${channel}] ${message}`);
+          const summarized = this.summarizeMcpLog(message);
+          if (summarized && !this.isTransportNoise(summarized)) {
+            emitStatus(summarized);
           }
 
           if (this.looksLikeLoginWall(message)) {
@@ -205,7 +217,7 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
                 "Login wall detected. Complete sign-in in the browser window, then send 'continue' in chat to resume.",
               toolResultData: {
                 kind: "login_required",
-                detectedFrom: traceMessage,
+                detectedFrom: message.slice(0, 800),
               },
             });
             emitStep(3, "running", "Paused at login wall awaiting user authentication.");
@@ -215,14 +227,24 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
       emitStep(3, "success", "Browser execution completed.", true);
       emitStep(4, "running", "Preparing final response summary.");
       emitStep(4, "success", "Final response summary ready.", true);
+      launchSpec.health.mcpBootOk = true;
+      const plannerFailureCode = this.detectPlannerFailureCode(result.summary, result.data);
+      const normalizedSuccess = result.success && !plannerFailureCode;
       return {
-        success: result.success,
-        summary: result.summary || "Browser task completed.",
-        data: result.data,
+        success: normalizedSuccess,
+        summary: result.summary || (normalizedSuccess ? "Browser task completed." : "Browser task failed."),
+        data: this.mergeRuntimeData(selection, launchSpec.health, {
+          toolResultParseable: Boolean(result.summary || result.data),
+          plannerInitOk: !plannerFailureCode,
+          plannerInitError: plannerFailureCode ? result.summary : "",
+          failureCode: plannerFailureCode,
+          raw: result.data,
+        }),
+        error: plannerFailureCode ? result.summary : undefined,
       };
     } catch (error) {
       emitStep(3, "failed", this.stringifyError(error), false);
-      const command = this.mcpCommand();
+      const command = launchSpec.command;
       const stderrTail = client.stderrTail();
       const stdoutTail = client.stdoutTail();
       let message = `Browser-Use MCP runtime failed using command '${command}': ${this.stringifyError(error)}`;
@@ -236,16 +258,29 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
         message += " Hint: This CLI expects `browser-use --mcp` instead of server host/port args.";
       }
       throw new Error(message);
-    } finally {
-      if (heartbeat) {
-        clearInterval(heartbeat);
-      }
     }
+  }
+
+  private summarizeToolCall(name: string, args: Record<string, unknown>): string {
+    const task = typeof args.task === "string"
+      ? args.task
+      : typeof args.prompt === "string"
+        ? args.prompt
+        : typeof args.query === "string"
+          ? args.query
+          : "";
+    if (task) {
+      return `Browser-Use agent call (${name}): ${task.slice(0, 220)}`;
+    }
+    return `Browser-Use agent call (${name})`;
   }
 
   private summarizeMcpLog(message: string): string {
     const trimmed = (message || "").trim();
     if (!trimmed) return "";
+    if (trimmed.startsWith("ANORHA_BROWSER_USE_PLANNER ")) {
+      return "Planner status received";
+    }
 
     if (trimmed.startsWith("{") && trimmed.includes("\"jsonrpc\"")) {
       try {
@@ -257,12 +292,12 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
           if (typeof parsed.result === "object" && parsed.result && "tools" in (parsed.result as Record<string, unknown>)) {
             const tools = (parsed.result as { tools?: unknown[] }).tools;
             const count = Array.isArray(tools) ? tools.length : 0;
-            return `MCP tools discovered (${count})`;
+            return `Browser-Use tools available (${count})`;
           }
-          return `MCP response received (id=${parsed.id})`;
+          return "";
         }
         if (parsed.error) {
-          return `MCP error response${typeof parsed.id === "number" ? ` (id=${parsed.id})` : ""}`;
+          return `Browser-Use MCP error${typeof parsed.id === "number" ? ` (id=${parsed.id})` : ""}`;
         }
       } catch {
         // fall through to generic shortening
@@ -275,11 +310,19 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
     return trimmed;
   }
 
-  private async getMcpClient(request: RuntimeExecutionRequest): Promise<BrowserUseMcpClient> {
-    const command = this.mcpCommand();
+  private isTransportNoise(message: string): boolean {
+    const value = (message || "").toLowerCase();
+    return (
+      value.includes("tools available") ||
+      value.includes("planner status received") ||
+      value.includes("mcp response received") ||
+      value.startsWith("{\"jsonrpc\"")
+    );
+  }
+
+  private async getMcpClient(command: string, extraEnv: Record<string, string>): Promise<BrowserUseMcpClient> {
     const initTimeout = this.intFromEnv("BROWSER_USE_MCP_INIT_TIMEOUT_MS", 15000);
     const toolTimeout = this.intFromEnv("BROWSER_USE_MCP_TOOL_TIMEOUT_MS", 180000);
-    const extraEnv = this.mcpEnvForRequest(request);
     const key = JSON.stringify({
       command,
       initTimeout,
@@ -300,148 +343,6 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
     this.mcpClient = new BrowserUseMcpClient(command, initTimeout, toolTimeout, extraEnv);
     this.mcpClientKey = key;
     return this.mcpClient;
-  }
-
-  private mcpEnvForRequest(request: RuntimeExecutionRequest): Record<string, string> {
-    const env: Record<string, string> = {};
-    const model = (request.options.providerModel || "").trim();
-    const route = request.options.providerRoute;
-    const browserName = (process.env.BROWSER_USE_MCP_BROWSER || "").trim();
-    const profileName = (process.env.BROWSER_USE_MCP_PROFILE || "").trim();
-    const sessionName = (process.env.BROWSER_USE_MCP_SESSION || request.threadId || "").trim();
-
-    if (route === "local_ollama") {
-      // Always pin local_ollama requests to the local Ollama OpenAI-compatible endpoint.
-      // This avoids accidental fallback to remote OpenAI when shell/profile env vars are set.
-      env.OPENAI_BASE_URL = (process.env.BROWSER_USE_LOCAL_OPENAI_BASE_URL || "http://127.0.0.1:11434/v1").trim();
-      env.OPENAI_API_KEY = (process.env.BROWSER_USE_LOCAL_OPENAI_API_KEY || "ollama").trim();
-      if (model) {
-        env.OPENAI_MODEL = model;
-      }
-      if (browserName) {
-        env.BROWSER_USE_BROWSER = browserName;
-      }
-      if (profileName) {
-        env.BROWSER_USE_PROFILE = profileName;
-      }
-      if (sessionName) {
-        env.BROWSER_USE_SESSION = sessionName;
-      }
-      return env;
-    }
-
-    if (route === "openrouter") {
-      const openRouterKey = (process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || "").trim();
-      const openRouterBase = (process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1").trim();
-      if (openRouterKey) {
-        env.OPENAI_API_KEY = openRouterKey;
-      }
-      if (openRouterBase) {
-        env.OPENAI_BASE_URL = openRouterBase;
-      }
-      if (model) {
-        env.OPENAI_MODEL = model;
-      }
-      if (browserName) {
-        env.BROWSER_USE_BROWSER = browserName;
-      }
-      if (profileName) {
-        env.BROWSER_USE_PROFILE = profileName;
-      }
-      if (sessionName) {
-        env.BROWSER_USE_SESSION = sessionName;
-      }
-      return env;
-    }
-
-    if (route === "kimi") {
-      const kimiKey = (process.env.MOONSHOT_API_KEY || process.env.OPENAI_API_KEY || "").trim();
-      const kimiBase = (process.env.MOONSHOT_BASE_URL || "https://api.moonshot.cn/v1").trim();
-      if (kimiKey) {
-        env.OPENAI_API_KEY = kimiKey;
-      }
-      if (kimiBase) {
-        env.OPENAI_BASE_URL = kimiBase;
-      }
-      if (model) {
-        env.OPENAI_MODEL = model;
-      }
-      if (browserName) {
-        env.BROWSER_USE_BROWSER = browserName;
-      }
-      if (profileName) {
-        env.BROWSER_USE_PROFILE = profileName;
-      }
-      if (sessionName) {
-        env.BROWSER_USE_SESSION = sessionName;
-      }
-      return env;
-    }
-
-    if (route === "ollama_cloud") {
-      // Ollama cloud models are typically exposed through the local Ollama daemon
-      // when the user is signed in, so default to local OpenAI-compatible endpoint.
-      const hostBase = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").trim().replace(/\/$/, "");
-      const cloudBase = (process.env.OLLAMA_CLOUD_BASE_URL || `${hostBase}/v1`).trim();
-      const cloudKey = (process.env.OLLAMA_CLOUD_API_KEY || "ollama").trim();
-      env.OPENAI_BASE_URL = cloudBase;
-      env.OPENAI_API_KEY = cloudKey;
-      if (model) {
-        env.OPENAI_MODEL = model;
-      }
-      if (browserName) {
-        env.BROWSER_USE_BROWSER = browserName;
-      }
-      if (profileName) {
-        env.BROWSER_USE_PROFILE = profileName;
-      }
-      if (sessionName) {
-        env.BROWSER_USE_SESSION = sessionName;
-      }
-      return env;
-    }
-
-    // For non-local routes, respect explicit OPENAI_MODEL if provided externally.
-    if (model && !process.env.OPENAI_MODEL) {
-      env.OPENAI_MODEL = model;
-    }
-    return env;
-  }
-
-  private mcpCommand(): string {
-    const explicit = (process.env.BROWSER_USE_MCP_CMD || "").trim();
-    if (explicit) {
-      return explicit;
-    }
-
-    const legacy = (process.env.BROWSER_USE_CMD || "").trim();
-    if (legacy) {
-      const normalizedLegacy = this.normalizeStartCommand(legacy);
-      if (/\bbrowser-use\b/.test(normalizedLegacy) && /\b--mcp\b/.test(normalizedLegacy)) {
-        return normalizedLegacy;
-      }
-    }
-
-    let command = "uvx --from browser-use browser-use --mcp";
-    const browser = (process.env.BROWSER_USE_MCP_BROWSER || "").trim();
-    const profile = (process.env.BROWSER_USE_MCP_PROFILE || "").trim();
-    const session = (process.env.BROWSER_USE_MCP_SESSION || "").trim();
-    const headed = this.boolEnv("BROWSER_USE_MCP_HEADED");
-
-    if (browser) {
-      command += ` --browser ${this.shellQuote(browser)}`;
-    }
-    if (profile) {
-      command += ` --profile ${this.shellQuote(profile)}`;
-    }
-    if (session) {
-      command += ` --session ${this.shellQuote(session)}`;
-    }
-    if (headed) {
-      command += " --headed";
-    }
-
-    return command;
   }
 
   private resolveMode(raw: string | undefined): BrowserUseMode {
@@ -470,18 +371,22 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async tryHTTPService(request: RuntimeExecutionRequest): Promise<RuntimeExecutionResult> {
+    const selection = resolveBrowserUseSelection(request);
     await this.ensureHTTPServiceRunning();
     const healthError = await this.checkHTTPServiceHealth();
+    const runtimeSpeed = this.resolveRuntimeSpeed(request);
+    const taskPrompt = this.applyRuntimeSpeedDirective(request.message, runtimeSpeed);
 
     const payload = {
       contractVersion: "anorha.browser-use.v1",
       threadId: request.threadId,
-      task: request.message,
+      task: taskPrompt,
       startUrl: request.startUrl,
       runtime: {
         headless: request.options.headless,
         modelRoute: request.options.providerRoute,
         modelName: request.options.providerModel,
+        speedMode: runtimeSpeed,
       },
       features: {
         recordingEnabled: request.options.recordingEnabled,
@@ -499,7 +404,10 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
         return {
           success: Boolean(data.success),
           summary: data.summary || (data.success ? "Browser-Use runtime completed." : "Browser-Use runtime failed."),
-          data: data.data,
+          data: this.mergeRuntimeData(selection, {
+            ...selection.health,
+            mcpBootOk: true,
+          }, data.data),
           error: data.error,
         };
       }
@@ -816,6 +724,28 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
     );
   }
 
+  private resolveRuntimeSpeed(request: RuntimeExecutionRequest): "fast" | "human" {
+    const value = String(request.options.runtimeSpeed || "").trim().toLowerCase();
+    return value === "human" ? "human" : "fast";
+  }
+
+  private applyRuntimeSpeedDirective(task: string, speed: "fast" | "human"): string {
+    const trimmedTask = String(task || "").trim();
+    if (!trimmedTask) {
+      return trimmedTask;
+    }
+    if (speed === "human") {
+      return (
+        "Execution mode: human-like pacing. Prefer cautious interactions and allow short waits when pages are unstable.\n\n" +
+        trimmedTask
+      );
+    }
+    return (
+      "Execution mode: fast. Minimize waits, avoid unnecessary pauses, and finish as quickly as possible while preserving accuracy.\n\n" +
+      trimmedTask
+    );
+  }
+
   private browserUseCredentialHint(request: RuntimeExecutionRequest): string | null {
     if (request.options.providerRoute === "local_ollama") {
       return null;
@@ -863,11 +793,137 @@ export class BrowserUseRuntimeAdapter implements RuntimeAdapter {
       return null;
     }
 
-    const cmd = this.mcpCommand();
+    const cmd = resolveBrowserUseLaunchSpec(resolveBrowserUseSelection(request)).command;
     if (!/\bbrowser-use\b/.test(cmd) || !/\b--mcp\b/.test(cmd)) {
       return null;
     }
 
     return "Browser-Use MCP requires OPENAI_API_KEY or ANTHROPIC_API_KEY for local mode. Set one of these env vars (and use `uvx --from browser-use browser-use --mcp`) or disable Browser use for this chat.";
+  }
+
+  private emitSelectionTrace(
+    request: RuntimeExecutionRequest,
+    selection: BrowserUseLLMSelection,
+    health: BrowserUseHealth,
+  ): void {
+    request.emit({
+      eventName: "tool_result",
+      threadId: request.threadId,
+      toolName: "runtime.browser_use_config",
+      toolResult: health.providerConfigOk,
+      content:
+        `Browser-Use config route=${selection.route} model=${selection.model || "default"} transport=${selection.transport} ` +
+        `schema=${selection.structuredOutputMode} flash=${selection.flashMode ? "on" : "off"} thinking=${selection.useThinking ? "on" : "off"} source=${selection.runtimeSource}`,
+      toolResultData: this.mergeRuntimeData(selection, health, {
+        toolResultParseable: false,
+      }),
+    });
+  }
+
+  private mergeRuntimeData(
+    selection: BrowserUseLLMSelection,
+    health: BrowserUseHealth,
+    data: unknown,
+  ): Record<string, unknown> {
+    const base: Record<string, unknown> = {
+      providerRoute: selection.route,
+      transport: selection.transport,
+      model: selection.model,
+      structuredOutputMode: selection.structuredOutputMode,
+      flashMode: selection.flashMode,
+      useThinking: selection.useThinking,
+      runtimeSource: selection.runtimeSource,
+      runtimeBundleFound: health.runtimeBundleFound,
+      browserBundleFound: health.browserBundleFound,
+      mcpBootOk: health.mcpBootOk,
+      providerConfigOk: health.providerConfigOk,
+    };
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return {
+        ...base,
+        ...(data as Record<string, unknown>),
+      };
+    }
+    if (typeof data !== "undefined") {
+      base.raw = data;
+    }
+    return base;
+  }
+
+  private buildFailureResult(request: RuntimeExecutionRequest, error: unknown): RuntimeExecutionResult {
+    const selection = resolveBrowserUseSelection(request);
+    const launchSpec = resolveBrowserUseLaunchSpec(selection);
+    const stderrTail = this.mcpClient?.stderrTail() || this.lastStderr.split("\n").slice(-8).join(" | ");
+    const stdoutTail = this.mcpClient?.stdoutTail() || "";
+    const failureCode = this.classifyFailureCode(`${this.stringifyError(error)}\n${stderrTail}\n${stdoutTail}`);
+
+    return {
+      success: false,
+      summary: `Browser-Use runtime failed (${failureCode}).`,
+      error: this.stringifyError(error),
+      data: this.mergeRuntimeData(selection, launchSpec.health, {
+        failureCode,
+        stderrTail,
+        stdoutTail,
+      }),
+    };
+  }
+
+  private classifyFailureCode(message: string): string {
+    const value = (message || "").toLowerCase();
+    if (!value.trim()) return "model_output_empty";
+    if (value.includes("planner_model_not_found") || (value.includes("model") && value.includes("not found"))) {
+      return "planner_model_not_found";
+    }
+    if (value.includes("planner_init_failed") || value.includes("planner init")) {
+      return "planner_init_failed";
+    }
+    if (value.includes("json") || value.includes("schema") || value.includes("parse")) {
+      return "structured_output_parse_failed";
+    }
+    if (value.includes("api key") || value.includes("unauthorized") || value.includes("authentication")) {
+      return "provider_auth_failed";
+    }
+    if (value.includes("spawn") || value.includes("initialize") || value.includes("healthcheck startup")) {
+      return "mcp_start_failed";
+    }
+    if (this.looksLikeLoginWall(value)) {
+      return "login_wall_detected";
+    }
+    if (value.includes("no actions") || value.includes("opened") || value.includes("idle")) {
+      return "browser_started_no_actions";
+    }
+    return "browser_started_no_actions";
+  }
+
+  private detectPlannerFailureCode(summary: string, data: unknown): string {
+    const haystack = `${summary || ""}\n${JSON.stringify(data || {})}`;
+    const normalized = haystack.toLowerCase();
+    if (normalized.includes("planner_model_not_found") || (normalized.includes("model") && normalized.includes("not found"))) {
+      return "planner_model_not_found";
+    }
+    if (normalized.includes("planner_init_failed") || normalized.includes("chatopenai") || normalized.includes("chatollama")) {
+      return "planner_init_failed";
+    }
+    if (normalized.includes("api key") || normalized.includes("unauthorized") || normalized.includes("authentication")) {
+      return "provider_auth_failed";
+    }
+    return "";
+  }
+
+  private parsePlannerStatus(message: string): Record<string, unknown> | null {
+    const trimmed = (message || "").trim();
+    const prefix = "ANORHA_BROWSER_USE_PLANNER ";
+    if (!trimmed.startsWith(prefix)) {
+      return null;
+    }
+    try {
+      return JSON.parse(trimmed.slice(prefix.length)) as Record<string, unknown>;
+    } catch {
+      return {
+        plannerInitOk: false,
+        plannerInitError: trimmed.slice(prefix.length),
+      };
+    }
   }
 }

@@ -92,7 +92,13 @@ DialogFontSize=12
 Source: "..\dist\windows-ollama-app-amd64.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}" ;Check: not IsArm64();  Flags: ignoreversion 64bit; BeforeInstall: TaskKill('{#MyAppExeName}')
 Source: "..\dist\windows-amd64\vc_redist.x64.exe"; DestDir: "{tmp}"; Check: not IsArm64() and vc_redist_needed(); Flags: deleteafterinstall
 Source: "..\dist\windows-amd64\ollama.exe"; DestDir: "{app}"; Check: not IsArm64(); Flags: ignoreversion 64bit; BeforeInstall: TaskKill('ollama.exe')
+Source: "..\dist\windows-amd64\node.exe"; DestDir: "{app}"; Check: not IsArm64(); Flags: ignoreversion 64bit
 Source: "..\dist\windows-amd64\lib\ollama\*"; DestDir: "{app}\lib\ollama\"; Check: not IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+Source: "..\dist\windows-amd64\agent-runtime\*"; DestDir: "{app}\agent-runtime\"; Check: not IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+Source: "..\dist\windows-amd64\browser-use-runtime\*"; DestDir: "{app}\browser-use-runtime\"; Check: not IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+#if DirExists("..\dist\windows-amd64\browser-use-browsers")
+Source: "..\dist\windows-amd64\browser-use-browsers\*"; DestDir: "{app}\browser-use-browsers\"; Check: not IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+#endif
 #endif
 
 ; For local development, rely on binary compatibility at runtime since we can't cross compile
@@ -105,6 +111,12 @@ Source: "..\dist\windows-ollama-app-amd64.exe"; DestDir: "{app}"; DestName: "{#M
 #if FileExists("..\dist\windows-arm64\ollama.exe")
 Source: "..\dist\windows-arm64\vc_redist.arm64.exe"; DestDir: "{tmp}"; Check: IsArm64() and vc_redist_needed(); Flags: deleteafterinstall
 Source: "..\dist\windows-arm64\ollama.exe"; DestDir: "{app}"; Check: IsArm64(); Flags: ignoreversion 64bit; BeforeInstall: TaskKill('ollama.exe')
+Source: "..\dist\windows-arm64\node.exe"; DestDir: "{app}"; Check: IsArm64(); Flags: ignoreversion 64bit
+Source: "..\dist\windows-arm64\agent-runtime\*"; DestDir: "{app}\agent-runtime\"; Check: IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+Source: "..\dist\windows-arm64\browser-use-runtime\*"; DestDir: "{app}\browser-use-runtime\"; Check: IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+#if DirExists("..\dist\windows-arm64\browser-use-browsers")
+Source: "..\dist\windows-arm64\browser-use-browsers\*"; DestDir: "{app}\browser-use-browsers\"; Check: IsArm64(); Flags: ignoreversion 64bit recursesubdirs
+#endif
 #endif
 
 Source: ".\assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion

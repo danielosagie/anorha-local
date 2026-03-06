@@ -342,6 +342,31 @@ function ToolRoleContent({
     );
   }
 
+  if (toolName === "runtime.browser_use_config" || toolName === "runtime.browser_use_planner") {
+    const data =
+      rawToolResult && typeof rawToolResult === "object" ? (rawToolResult as Record<string, unknown>) : undefined;
+    const model = typeof data?.model === "string"
+      ? data.model
+      : typeof data?.plannerModel === "string"
+        ? data.plannerModel
+        : "";
+    const route = typeof data?.providerRoute === "string" ? data.providerRoute : "";
+    const transport = typeof data?.transport === "string" ? data.transport : "";
+    return (
+      <div className="rounded-lg border border-emerald-300/70 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-950/30 p-3 text-sm text-emerald-900 dark:text-emerald-100">
+        <div className="font-semibold mb-1">
+          {toolName === "runtime.browser_use_config" ? "Browser Use Config" : "Browser Use Planner"}
+        </div>
+        <div>{content}</div>
+        {(model || route || transport) && (
+          <div className="mt-2 text-xs opacity-85">
+            {[route, model, transport].filter(Boolean).join(" | ")}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (toolName === "runtime.playwright_preset") {
     const presetData =
       rawToolResult && typeof rawToolResult === "object" ? (rawToolResult as Record<string, unknown>) : undefined;

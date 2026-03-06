@@ -1,22 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchUser, fetchConnectUrl, disconnectUser } from "@/api";
-import { APP_AUTH_PROVIDER } from "@/api";
+import { fetchUser, fetchOllamaConnectUrl, disconnectUser } from "@/api";
 
 export function useUser() {
   const queryClient = useQueryClient();
 
   const userQuery = useQuery({
     queryKey: ["user"],
-    queryFn: async () => {
-      if (APP_AUTH_PROVIDER === "clerk") {
-        return null;
-      }
-      const result = await fetchUser();
-      return result;
-    },
+    queryFn: fetchUser,
     staleTime: 5 * 60 * 1000, // Consider data stale after 5 minutes
     gcTime: 10 * 60 * 1000, // Keep in cache for 10 minutes
-    retry: APP_AUTH_PROVIDER === "clerk" ? false : 10,
+    retry: false,
     retryDelay: (attemptIndex) => Math.min(500 * attemptIndex, 2000),
     refetchOnMount: true, // Always fetch when component mounts
   });
@@ -32,7 +25,7 @@ export function useUser() {
   // Query for connect URL (only fetched when needed)
   const connectUrlQuery = useQuery({
     queryKey: ["connectUrl"],
-    queryFn: fetchConnectUrl,
+    queryFn: fetchOllamaConnectUrl,
     enabled: false, // Don't fetch automatically
     staleTime: Infinity, // Connect URL doesn't change
   });

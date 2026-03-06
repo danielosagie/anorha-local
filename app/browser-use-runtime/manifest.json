@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "browserUseVersion": "0.11.9",
+  "playwrightVersion": "1.58.2",
+  "python": {
+    "macos": [
+      "bin/python3",
+      "bin/python"
+    ],
+    "windows": [
+      "Scripts/python.exe"
+    ]
+  },
+  "browserUseMcpCommand": {
+    "macos": "bin/browser-use",
+    "windows": "Scripts/browser-use.exe"
+  },
+  "browserPaths": {
+    "macos": "../browser-use-browsers",
+    "windows": "../browser-use-browsers"
+  }
+}

@@ -129,6 +129,7 @@ type ChatRequest struct {
 	BrowserControlEnabled *bool        `json:"browserControlEnabled,omitempty"`
 	RuntimeBackend        string       `json:"runtimeBackend,omitempty"`
 	RuntimeCDPURL         string       `json:"runtimeCDPURL,omitempty"`
+	RuntimeSpeed          string       `json:"runtimeSpeed,omitempty"`
 	RuntimeTabIndex       *int         `json:"runtimeTabIndex,omitempty"`
 	RuntimeTabMatch       string       `json:"runtimeTabMatch,omitempty"`
 	RuntimeTabPolicy      string       `json:"runtimeTabPolicy,omitempty"`

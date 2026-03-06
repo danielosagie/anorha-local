@@ -75,6 +75,7 @@ export class RuntimeManager {
       const message = error instanceof Error ? error.message : String(error);
       const shouldFallbackFromAttached =
         preferred === "playwright_attached" &&
+        request.options.allowAttachedFallback === true &&
         (message.includes("connect ECONNREFUSED") ||
           message.includes("connectOverCDP") ||
           message.includes("attached_precondition_failed:"));

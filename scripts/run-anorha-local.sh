@@ -14,11 +14,16 @@ VITE_PORT="${ANORHA_VITE_PORT:-5173}"
 BROWSER_USE_MODE="${BROWSER_USE_MODE:-mcp}"
 BROWSER_USE_BASE_URL="${BROWSER_USE_BASE_URL:-http://127.0.0.1:9999}"
 BROWSER_USE_CMD="${BROWSER_USE_CMD:-uvx --from browser-use browser-use server}"
-BROWSER_USE_MCP_CMD="${BROWSER_USE_MCP_CMD:-uvx --from browser-use browser-use --mcp}"
+BROWSER_USE_MCP_CMD="${BROWSER_USE_MCP_CMD:-}"
 BROWSER_USE_MCP_BROWSER="${BROWSER_USE_MCP_BROWSER:-}"
 BROWSER_USE_MCP_PROFILE="${BROWSER_USE_MCP_PROFILE:-}"
 BROWSER_USE_MCP_SESSION="${BROWSER_USE_MCP_SESSION:-}"
 BROWSER_USE_MCP_HEADED="${BROWSER_USE_MCP_HEADED:-}"
+BROWSER_USE_LLM_TRANSPORT="${BROWSER_USE_LLM_TRANSPORT:-auto}"
+BROWSER_USE_ENABLE_NATIVE_OLLAMA="${BROWSER_USE_ENABLE_NATIVE_OLLAMA:-0}"
+BROWSER_USE_BUNDLED_RUNTIME_DIR="${BROWSER_USE_BUNDLED_RUNTIME_DIR:-}"
+BROWSER_USE_BUNDLED_BROWSER_DIR="${BROWSER_USE_BUNDLED_BROWSER_DIR:-}"
+BROWSER_USE_RUNTIME_SOURCE="${BROWSER_USE_RUNTIME_SOURCE:-dev-external}"
 ANORHA_RUNTIME_BACKEND="${ANORHA_RUNTIME_BACKEND:-}"
 ANORHA_CHROME_CDP_URL="${ANORHA_CHROME_CDP_URL:-http://127.0.0.1:9222}"
 ANORHA_CHROME_TAB_INDEX="${ANORHA_CHROME_TAB_INDEX:-}"
@@ -46,7 +51,7 @@ Options:
   --browser-use-mode <m>    Browser-Use mode: mcp|http|auto (default: mcp)
   --browser-use-url <url>   Browser-Use service base URL for HTTP mode (default: http://127.0.0.1:9999)
   --browser-use-cmd <cmd>   Command to start Browser-Use service in HTTP mode (default: uvx --from browser-use browser-use server)
-  --browser-use-mcp-cmd <c> Command to start Browser-Use MCP server (default: uvx --from browser-use browser-use --mcp)
+  --browser-use-mcp-cmd <c> Command to start Browser-Use MCP server (default: local wrapper in app/agent-runtime/dist)
   --browser-use-mcp-browser <b> Browser-Use MCP browser mode (chromium|real|remote)
   --browser-use-mcp-profile <p> Browser-Use MCP profile name/id
   --browser-use-mcp-session <s> Browser-Use MCP session name
@@ -264,6 +269,16 @@ ensure_agent_runtime_built() {
   (cd "$runtime_dir" && npm run build >/dev/null)
 }
 
+default_browser_use_mcp_cmd() {
+  local wrapper_js="$ROOT_DIR/app/agent-runtime/dist/browser-use-mcp-wrapper.js"
+  if [[ -f "$wrapper_js" ]]; then
+    printf "node %q" "$wrapper_js"
+    return 0
+  fi
+
+  printf '%s' "uvx --from browser-use browser-use --mcp"
+}
+
 restart_existing_runtime_sidecar() {
   if [[ "$ANORHA_RUNTIME_FORCE_RESTART" != "1" && "$ANORHA_RUNTIME_FORCE_RESTART" != "true" ]]; then
     return 0
@@ -407,6 +422,11 @@ export BROWSER_USE_MCP_BROWSER="$BROWSER_USE_MCP_BROWSER"
 export BROWSER_USE_MCP_PROFILE="$BROWSER_USE_MCP_PROFILE"
 export BROWSER_USE_MCP_SESSION="$BROWSER_USE_MCP_SESSION"
 export BROWSER_USE_MCP_HEADED="$BROWSER_USE_MCP_HEADED"
+export BROWSER_USE_LLM_TRANSPORT="$BROWSER_USE_LLM_TRANSPORT"
+export BROWSER_USE_ENABLE_NATIVE_OLLAMA="$BROWSER_USE_ENABLE_NATIVE_OLLAMA"
+export BROWSER_USE_BUNDLED_RUNTIME_DIR="$BROWSER_USE_BUNDLED_RUNTIME_DIR"
+export BROWSER_USE_BUNDLED_BROWSER_DIR="$BROWSER_USE_BUNDLED_BROWSER_DIR"
+export BROWSER_USE_RUNTIME_SOURCE="$BROWSER_USE_RUNTIME_SOURCE"
 export ANORHA_RUNTIME_BACKEND="$ANORHA_RUNTIME_BACKEND"
 export ANORHA_CHROME_CDP_URL="$ANORHA_CHROME_CDP_URL"
 export ANORHA_CHROME_TAB_INDEX="$ANORHA_CHROME_TAB_INDEX"
@@ -414,13 +434,20 @@ export ANORHA_CHROME_TAB_MATCH="$ANORHA_CHROME_TAB_MATCH"
 export BROWSER_USE_AUTOSTART="$BROWSER_USE_AUTOSTART"
 export BROWSER_USE_WAIT_SECONDS="$BROWSER_USE_WAIT_SECONDS"
 
-echo "[browser-use] runtime-route selection happens per run in app logs (route/model)"
-echo "[browser-use] mcp browser=${BROWSER_USE_MCP_BROWSER:-default} profile=${BROWSER_USE_MCP_PROFILE:-default} session=${BROWSER_USE_MCP_SESSION:-default} headed=${BROWSER_USE_MCP_HEADED:-0}"
-echo "[runtime] backend=${ANORHA_RUNTIME_BACKEND:-playwright_attached(default)} chrome_cdp_url=${ANORHA_CHROME_CDP_URL}"
-echo "[runtime] attached tab index=${ANORHA_CHROME_TAB_INDEX:-auto} match=${ANORHA_CHROME_TAB_MATCH:-none}"
-
 apply_tray_icon "$TRAY_ICON"
 ensure_agent_runtime_built
+if [[ -z "$BROWSER_USE_MCP_CMD" ]]; then
+  BROWSER_USE_MCP_CMD="$(default_browser_use_mcp_cmd)"
+  export BROWSER_USE_MCP_CMD
+fi
+
+echo "[browser-use] runtime-route selection happens per run in app logs (route/model)"
+echo "[browser-use] mcp browser=${BROWSER_USE_MCP_BROWSER:-default} profile=${BROWSER_USE_MCP_PROFILE:-default} session=${BROWSER_USE_MCP_SESSION:-default} headed=${BROWSER_USE_MCP_HEADED:-0}"
+echo "[browser-use] transport=${BROWSER_USE_LLM_TRANSPORT} native_ollama=${BROWSER_USE_ENABLE_NATIVE_OLLAMA} runtime_source=${BROWSER_USE_RUNTIME_SOURCE}"
+echo "[browser-use] bundled_runtime_dir=${BROWSER_USE_BUNDLED_RUNTIME_DIR:-none} bundled_browser_dir=${BROWSER_USE_BUNDLED_BROWSER_DIR:-none}"
+echo "[browser-use] mcp command=${BROWSER_USE_MCP_CMD}"
+echo "[runtime] backend=${ANORHA_RUNTIME_BACKEND:-playwright_attached(default)} chrome_cdp_url=${ANORHA_CHROME_CDP_URL}"
+echo "[runtime] attached tab index=${ANORHA_CHROME_TAB_INDEX:-auto} match=${ANORHA_CHROME_TAB_MATCH:-none}"
 restart_existing_runtime_sidecar
 autostart_lc="$(printf '%s' "$BROWSER_USE_AUTOSTART" | tr '[:upper:]' '[:lower:]')"
 if [[ "$autostart_lc" != "0" && "$autostart_lc" != "false" && "$autostart_lc" != "off" && "$ANORHA_RUNTIME_BACKEND" != "playwright_attached" ]]; then

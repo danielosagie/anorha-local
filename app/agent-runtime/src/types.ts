@@ -27,6 +27,8 @@ export interface RuntimeOptions {
   headless: boolean;
   webToolsEnabled: boolean;
   runtimeBackend: RuntimeBackend;
+  allowAttachedFallback?: boolean;
+  runtimeSpeed?: "fast" | "human";
   runtimeCDPURL?: string;
   runtimeTabIndex?: number;
   runtimeTabMatch?: string;
@@ -42,6 +44,7 @@ export interface RuntimeOptions {
 
 export interface WorkflowRuntimeOverrides {
   runtimeBackend?: RuntimeBackend;
+  runtimeSpeed?: "fast" | "human";
   runtimeCDPURL?: string;
   runtimeTabIndex?: number;
   runtimeTabMatch?: string;
@@ -354,7 +357,9 @@ export const DEFAULT_OPTIONS: RuntimeOptions = {
   browserControlEnabled: true,
   headless: false,
   webToolsEnabled: true,
-  runtimeBackend: "playwright_attached",
+  runtimeBackend: "browser_use_ts",
+  allowAttachedFallback: false,
+  runtimeSpeed: "fast",
   runtimeCDPURL: "http://127.0.0.1:9222",
   runtimeTabPolicy: "pinned",
   runtimeMaxSteps: 8,

@@ -32,6 +32,11 @@ import {
   setCredential,
   APP_AUTH_PROVIDER,
 } from "@/api";
+import {
+  clearAppSignedIn,
+  isAppAuthEnabled,
+  isAppSignedIn,
+} from "@/lib/appAuth";
 
 function AnimatedDots() {
   return (
@@ -70,6 +75,8 @@ export default function Settings() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pollingInterval, setPollingInterval] = useState<number | null>(null);
   const navigate = useNavigate();
+  const appAuthEnabled = isAppAuthEnabled();
+  const appSignedIn = isAppSignedIn();
   const {
     cloudDisabled,
     cloudStatus,
@@ -276,14 +283,12 @@ export default function Settings() {
         const { data: connectUrl } = await fetchConnectUrl();
         if (connectUrl) {
           window.open(connectUrl, "_blank");
-          if (APP_AUTH_PROVIDER === "ollama") {
-            setIsAwaitingConnection(true);
-            // Start polling every 5 seconds
-            const interval = setInterval(() => {
-              refreshUser();
-            }, 5000);
-            setPollingInterval(interval);
-          }
+          setIsAwaitingConnection(true);
+          // Start polling every 5 seconds
+          const interval = setInterval(() => {
+            refreshUser();
+          }, 5000);
+          setPollingInterval(interval);
         } else {
           setConnectionError("Failed to get connect URL");
         }
@@ -297,6 +302,11 @@ export default function Settings() {
       );
       setIsAwaitingConnection(false);
     }
+  };
+
+  const handleLockApp = () => {
+    clearAppSignedIn();
+    navigate({ to: "/login" });
   };
 
   if (loading) {
@@ -344,12 +354,49 @@ export default function Settings() {
       </header>
       <div className="w-full p-6 overflow-y-auto flex-1 overscroll-contain">
         <div className="space-y-4 max-w-2xl mx-auto">
-          {/* Connect Ollama Account */}
+          {/* App Access */}
+          {appAuthEnabled && (
+            <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
+              <div className="p-4">
+                <Field>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Anorha app access</Label>
+                      <Description>
+                        Sign-in state for using Anorha Local ({APP_AUTH_PROVIDER.toUpperCase()}).
+                      </Description>
+                      <div className="mt-2">
+                        {appSignedIn ? (
+                          <Badge color="green">Signed in</Badge>
+                        ) : (
+                          <Badge color="zinc">Signed out</Badge>
+                        )}
+                      </div>
+                    </div>
+                    {appSignedIn ? (
+                      <Button type="button" color="zinc" onClick={handleLockApp}>
+                        Lock App
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        color="white"
+                        onClick={() => navigate({ to: "/login" })}
+                      >
+                        Open Sign-In
+                      </Button>
+                    )}
+                  </div>
+                </Field>
+              </div>
+            </div>
+          )}
+
+          {/* Ollama Cloud Account */}
           <div className="overflow-hidden rounded-xl bg-white dark:bg-neutral-800">
             <div className="p-4">
               <Field>
                 {isLoading ? (
-                  // Loading skeleton, this will only happen if the app started recently
                   <div className="flex items-center justify-between">
                     <div className="space-y-2">
                       <div className="h-4 bg-neutral-200 dark:bg-neutral-700 rounded animate-pulse w-24"></div>
@@ -368,51 +415,45 @@ export default function Settings() {
                       <Description className="text-sm text-neutral-500 dark:text-neutral-400">
                         {user?.email}
                       </Description>
-                      {APP_AUTH_PROVIDER === "ollama" ? (
-                        <div className="flex items-center space-x-2 mt-2">
-                          {user?.plan === "free" && (
-                            <Button
-                              type="button"
-                              color="dark"
-                              className="px-3 py-2 text-sm font-medium bg-black/90 backdrop-blur-sm text-white rounded-lg border border-white/10 shadow-2xl transition-all duration-300 ease-out relative overflow-hidden group"
-                              onClick={() =>
-                                window.open(
-                                  "https://ollama.com/upgrade",
-                                  "_blank",
-                                )
-                              }
-                            >
-                              <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/20 via-purple-500/20 to-green-500/20 opacity-60 group-hover:opacity-80 transition-opacity duration-300"></div>
-                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000 ease-out"></div>
-                              <span className="relative z-10 flex items-center space-x-2">
-                                <span>Upgrade</span>
-                              </span>
-                            </Button>
-                          )}
+                      <div className="flex items-center space-x-2 mt-2">
+                        {user?.plan === "free" && (
                           <Button
                             type="button"
-                            color="white"
-                            className="px-3 py-2 text-sm"
+                            color="dark"
+                            className="px-3 py-2 text-sm font-medium bg-black/90 backdrop-blur-sm text-white rounded-lg border border-white/10 shadow-2xl transition-all duration-300 ease-out relative overflow-hidden group"
                             onClick={() =>
-                              window.open("https://ollama.com/settings", "_blank")
+                              window.open(
+                                "https://ollama.com/upgrade",
+                                "_blank",
+                              )
                             }
                           >
-                            Manage
+                            <div className="absolute inset-0 bg-gradient-to-r from-cyan-500/20 via-purple-500/20 to-green-500/20 opacity-60 group-hover:opacity-80 transition-opacity duration-300"></div>
+                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000 ease-out"></div>
+                            <span className="relative z-10 flex items-center space-x-2">
+                              <span>Upgrade</span>
+                            </span>
                           </Button>
-                          <Button
-                            type="button"
-                            color="zinc"
-                            className="px-3 py-2 text-sm"
-                            onClick={() => disconnectUser()}
-                          >
-                            Sign out
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="mt-2">
-                          <Badge color="green">Signed in with Anorha</Badge>
-                        </div>
-                      )}
+                        )}
+                        <Button
+                          type="button"
+                          color="white"
+                          className="px-3 py-2 text-sm"
+                          onClick={() =>
+                            window.open("https://ollama.com/settings", "_blank")
+                          }
+                        >
+                          Manage
+                        </Button>
+                        <Button
+                          type="button"
+                          color="zinc"
+                          className="px-3 py-2 text-sm"
+                          onClick={() => disconnectUser()}
+                        >
+                          Sign out
+                        </Button>
+                      </div>
                     </div>
                     {user?.avatarurl && (
                       <img
@@ -429,15 +470,9 @@ export default function Settings() {
                 ) : (
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label>
-                        {APP_AUTH_PROVIDER === "clerk"
-                          ? "Anorha account (Clerk)"
-                          : "Ollama account"}
-                      </Label>
+                      <Label>Ollama Cloud account</Label>
                       <Description>
-                        {APP_AUTH_PROVIDER === "clerk"
-                          ? "Sign in to Anorha to access app-level features."
-                          : "Not connected"}
+                        Optional. Connect only if you want Ollama Cloud models.
                       </Description>
                     </div>
                     <Button
@@ -449,7 +484,7 @@ export default function Settings() {
                       {isRefreshing || isAwaitingConnection ? (
                         <AnimatedDots />
                       ) : (
-                        "Sign In"
+                        "Connect"
                       )}
                     </Button>
                   </div>

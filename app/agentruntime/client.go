@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -20,7 +21,12 @@ type Client struct {
 }
 
 func NewClient(baseURL string) *Client {
-	timeout := 5 * time.Minute
+	timeout := 15 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("ANORHA_RUNTIME_HTTP_TIMEOUT")); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			timeout = parsed
+		}
+	}
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTP: &http.Client{

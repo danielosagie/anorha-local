@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 mkdir -Force -path .\dist | Out-Null
 
 function checkEnv {
+    $repoRoot = Split-Path -Parent $PSScriptRoot
     if ($null -ne $env:ARCH ) {
         $script:ARCH = $env:ARCH
     } else {
@@ -23,7 +24,8 @@ function checkEnv {
     $script:TARGET_ARCH=$script:ARCH
     Write-host "Building for ${script:TARGET_ARCH}"
     write-host "Locating required tools and paths"
-    $script:SRC_DIR=$PWD
+    $script:SRC_DIR=$repoRoot
+    Set-Location $script:SRC_DIR
 
     # Locate CUDA versions
     $cudaList=(get-item "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin\" -ea 'silentlycontinue')
@@ -236,6 +238,50 @@ function ollama {
     cp .\ollama.exe "${script:DIST_DIR}\"
 }
 
+function Bundle-AgentRuntimeResources {
+    param (
+        [string]$TargetDir
+    )
+
+    Write-Host "Bundling agent runtime resources into $TargetDir"
+    New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+
+    Push-Location app/agent-runtime
+    if (!(Test-Path "node_modules")) {
+        npm install
+        if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE) }
+    }
+    npm run build
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE) }
+    Pop-Location
+
+    & powershell -ExecutionPolicy Bypass -File ".\scripts\prepare_browser_use_runtime.ps1" `
+        -RuntimeDir (Join-Path $script:DIST_DIR "browser-use-runtime") `
+        -BrowserDir (Join-Path $script:DIST_DIR "browser-use-browsers")
+    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE) }
+
+    $agentRuntimeDir = Join-Path $TargetDir "agent-runtime"
+    New-Item -ItemType Directory -Force -Path $agentRuntimeDir | Out-Null
+
+    if (Test-Path ".\app\agent-runtime\dist") {
+        Copy-Item ".\app\agent-runtime\dist" -Destination $agentRuntimeDir -Recurse -Force
+    }
+    if (Test-Path ".\app\agent-runtime\node_modules") {
+        Copy-Item ".\app\agent-runtime\node_modules" -Destination $agentRuntimeDir -Recurse -Force
+    }
+    if (Test-Path (Join-Path $script:DIST_DIR "browser-use-runtime")) {
+        Copy-Item (Join-Path $script:DIST_DIR "browser-use-runtime") -Destination $TargetDir -Recurse -Force
+    }
+    if (Test-Path (Join-Path $script:DIST_DIR "browser-use-browsers")) {
+        Copy-Item (Join-Path $script:DIST_DIR "browser-use-browsers") -Destination $TargetDir -Recurse -Force
+    }
+
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($null -ne $nodeCmd -and (Test-Path $nodeCmd.Path)) {
+        Copy-Item $nodeCmd.Path -Destination (Join-Path $TargetDir "node.exe") -Force
+    }
+}
+
 function app {
     write-host "Building Ollama App $script:VERSION with package version $script:PKG_VERSION"
 
@@ -245,9 +291,9 @@ function app {
         exit 1
     }
 
-    if (!(Get-Command tsc -ErrorAction SilentlyContinue)) {
-        write-host "Installing TypeScript compiler..."
-        npm install -g typescript
+    if (!(Test-Path ".\app\ui\app\node_modules\.bin\tsc.cmd") -and !(Get-Command tsc -ErrorAction SilentlyContinue)) {
+        write-host "TypeScript compiler is unavailable. Run npm install in app/ui/app first."
+        exit 1
     }
     if (!(Get-Command tscriptify -ErrorAction SilentlyContinue)) {
         write-host "Installing tscriptify..."
@@ -258,10 +304,12 @@ function app {
     }
 
     Push-Location app/ui/app
-    npm install
-    if ($LASTEXITCODE -ne 0) { 
-        write-host "ERROR: npm install failed with exit code $LASTEXITCODE"
-        exit $LASTEXITCODE
+    if (!(Test-Path "node_modules")) {
+        npm install
+        if ($LASTEXITCODE -ne 0) { 
+            write-host "ERROR: npm install failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
     }
 
     write-host "Building React application..."
@@ -290,6 +338,7 @@ function app {
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
 	& go build -trimpath -ldflags "-s -w -H windowsgui -X=github.com/ollama/ollama/app/version.Version=$script:VERSION" -o .\dist\windows-ollama-app-${script:ARCH}.exe ./app/cmd/app/
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    Bundle-AgentRuntimeResources -TargetDir $script:DIST_DIR
 }
 
 function deps {

@@ -39,6 +39,11 @@ export interface BrowserUseMcpRunHooks {
   onLog?: (channel: "stdout" | "stderr", message: string) => void;
 }
 
+interface ToolCallCandidate {
+  name: string;
+  args: Record<string, unknown>;
+}
+
 export class BrowserUseMcpClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
   private readonly command: string;
@@ -70,53 +75,38 @@ export class BrowserUseMcpClient {
     try {
     await this.ensureInitialized();
 
-    const candidateNames = this.rankToolNames();
-    if (!candidateNames.length) {
-      throw new Error("Browser-Use MCP server exposed no callable tools.");
+    const candidates = this.buildToolCandidates(task, metadata);
+    if (!candidates.length) {
+      throw new Error("Browser-Use MCP server exposed no agent task tool. Refusing to call low-level browser tools directly.");
     }
-
-    const payloadBase = {
-      task,
-      prompt: task,
-      query: task,
-      input: task,
-      instruction: task,
-      ...metadata,
-    };
-
-    const argVariants: Record<string, unknown>[] = [
-      payloadBase,
-      { task, ...metadata },
-      { task },
-    ];
 
     const errors: string[] = [];
     this.runHooks?.onStatus?.("Browser-Use MCP initialized. Running browser task...");
-    for (const toolName of candidateNames) {
-      for (const args of argVariants) {
-        try {
-          this.runHooks?.onToolCall?.(toolName, args);
-          const out = await this.callTool(toolName, args);
-          this.runHooks?.onToolResult?.(toolName, out);
-          const summary = this.extractText(out) || "Browser task completed.";
-          const isError = Boolean((out as { isError?: boolean })?.isError);
-          if (isError) {
-            const errText = this.extractErrorText(out) || "Browser-Use tool returned an error.";
-            throw new Error(errText);
-          }
-          return {
-            success: true,
-            summary,
-            data: out,
-          };
-        } catch (err) {
-          const errText = this.stringifyError(err);
-          errors.push(`${toolName}: ${errText}`);
-          if (this.shouldAbortRetries(errText)) {
-            throw new Error(errText);
-          }
-          this.runHooks?.onStatus?.(`Retrying browser tool call after error: ${errText}`);
+    for (const candidate of candidates) {
+      try {
+        this.runHooks?.onToolCall?.(candidate.name, candidate.args);
+        const out = await this.callTool(candidate.name, candidate.args);
+        this.runHooks?.onToolResult?.(candidate.name, out);
+        const summary = this.extractText(out) || "Browser task completed.";
+        const isError = Boolean((out as { isError?: boolean })?.isError);
+        const plannerFailure = this.isDeterministicPlannerFailure(summary) ||
+          this.isDeterministicPlannerFailure(JSON.stringify(out));
+        if (isError || plannerFailure) {
+          const errText = this.extractErrorText(out) || summary || "Browser-Use tool returned an error.";
+          throw new Error(errText);
         }
+        return {
+          success: !plannerFailure,
+          summary,
+          data: out,
+        };
+      } catch (err) {
+        const errText = this.stringifyError(err);
+        errors.push(`${candidate.name}: ${errText}`);
+        if (this.shouldAbortRetries(errText)) {
+          throw new Error(errText);
+        }
+        this.runHooks?.onStatus?.(`Retrying Browser-Use agent after error: ${errText}`);
       }
     }
 
@@ -407,6 +397,7 @@ export class BrowserUseMcpClient {
       "agent.run",
       "agent_run",
       "run_agent",
+      "retry_with_browser_use_agent",
       "browser_use.run",
       "browser_use.run_task",
       "run",
@@ -429,13 +420,94 @@ export class BrowserUseMcpClient {
       }
     }
 
-    for (const name of names) {
-      if (!ranked.includes(name)) {
-        ranked.push(name);
+    return ranked.filter((name) => !/^browser_(navigate|click|type|press|scroll|get_state|extract|wait|tab)/i.test(name));
+  }
+
+  private buildToolCandidates(task: string, metadata: Record<string, unknown>): ToolCallCandidate[] {
+    const payloadBase = {
+      task,
+      prompt: task,
+      query: task,
+      input: task,
+      instruction: task,
+      ...metadata,
+    };
+    const rankedNames = this.rankToolNames();
+    const candidates: ToolCallCandidate[] = [];
+
+    for (const name of rankedNames) {
+      const tool = this.tools.find((entry) => entry.name === name);
+      if (!tool || !this.isAgentTool(tool.name)) {
+        continue;
+      }
+      const filteredVariants = this.buildSchemaFilteredVariants(tool, payloadBase);
+      for (const args of filteredVariants) {
+        candidates.push({ name: tool.name, args });
       }
     }
 
-    return ranked;
+    return candidates;
+  }
+
+  private isAgentTool(name: string): boolean {
+    return /agent|task|run/i.test(name) || name === "retry_with_browser_use_agent";
+  }
+
+  private buildSchemaFilteredVariants(tool: MCPTool, payloadBase: Record<string, unknown>): Record<string, unknown>[] {
+    const schema = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+    const propertyNames = Object.keys(schema?.properties || {});
+    if (!propertyNames.length) {
+      return [{ task: String(payloadBase.task || "") }];
+    }
+
+    const prioritizedSeeds: Array<Record<string, unknown>> = [
+      payloadBase,
+      { task: payloadBase.task, prompt: payloadBase.prompt, startUrl: payloadBase.startUrl, url: payloadBase.url },
+      { task: payloadBase.task },
+    ];
+    const variants: Record<string, unknown>[] = [];
+    for (const seed of prioritizedSeeds) {
+      const args: Record<string, unknown> = {};
+      for (const key of propertyNames) {
+        if (typeof seed[key] !== "undefined") {
+          args[key] = seed[key];
+        }
+      }
+      if (!("task" in args) && propertyNames.includes("task")) {
+        args.task = String(payloadBase.task || "");
+      }
+      if (!("prompt" in args) && propertyNames.includes("prompt")) {
+        args.prompt = String(payloadBase.task || "");
+      }
+      if (!("query" in args) && propertyNames.includes("query")) {
+        args.query = String(payloadBase.task || "");
+      }
+      if (!("instruction" in args) && propertyNames.includes("instruction")) {
+        args.instruction = String(payloadBase.task || "");
+      }
+      if (!("input" in args) && propertyNames.includes("input")) {
+        args.input = String(payloadBase.task || "");
+      }
+      if (this.hasRequiredFields(args, schema?.required || [])) {
+        variants.push(args);
+      }
+    }
+
+    const deduped = new Map<string, Record<string, unknown>>();
+    for (const variant of variants) {
+      deduped.set(JSON.stringify(variant), variant);
+    }
+    return [...deduped.values()];
+  }
+
+  private hasRequiredFields(args: Record<string, unknown>, required: string[]): boolean {
+    for (const key of required) {
+      const value = args[key];
+      if (typeof value === "undefined" || value === null || value === "") {
+        return false;
+      }
+    }
+    return true;
   }
 
   private extractText(result: any): string {
@@ -545,9 +617,33 @@ export class BrowserUseMcpClient {
     return (
       normalized.includes("invalid_api_key") ||
       normalized.includes("incorrect api key") ||
+      normalized.includes("planner_init_failed") ||
+      normalized.includes("planner model") ||
+      normalized.includes("chatopenai") ||
+      normalized.includes("chatollama") ||
+      normalized.includes("authentication") ||
+      normalized.includes("api key") ||
+      normalized.includes("error code: 404") ||
+      normalized.includes("404") ||
       normalized.includes("model") && normalized.includes("not found") ||
       normalized.includes("unauthorized") ||
       normalized.includes("forbidden")
+    );
+  }
+
+  private isDeterministicPlannerFailure(text: string): boolean {
+    const normalized = (text || "").toLowerCase();
+    return (
+      normalized.includes("planner_init_failed") ||
+      normalized.includes("planner model is empty") ||
+      normalized.includes("planner_model_not_found") ||
+      normalized.includes("chatopenai") ||
+      normalized.includes("chatollama") ||
+      normalized.includes("error code: 404") ||
+      normalized.includes("authentication") ||
+      normalized.includes("unauthorized") ||
+      normalized.includes("api key") ||
+      (normalized.includes("model") && normalized.includes("not found"))
     );
   }
 }

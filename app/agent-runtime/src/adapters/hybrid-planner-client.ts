@@ -68,16 +68,21 @@ const ALLOWED_ACTIONS = new Set<HybridActionType>([
 export class HybridPlannerClient {
   private readonly route: ProviderRoute;
   private readonly model: string;
+  private readonly runtimeSpeed: "fast" | "human";
 
-  constructor(route: ProviderRoute, model: string) {
+  constructor(route: ProviderRoute, model: string, runtimeSpeed: "fast" | "human") {
     this.route = route;
     this.model = model.trim();
+    this.runtimeSpeed = runtimeSpeed;
   }
 
   static fromOptions(options: RuntimeOptions): HybridPlannerClient {
     const route = options.providerRoute;
     const model = (options.providerModel || "").trim();
-    return new HybridPlannerClient(route, model);
+    const runtimeSpeed = String(options.runtimeSpeed || "fast").trim().toLowerCase() === "human"
+      ? "human"
+      : "fast";
+    return new HybridPlannerClient(route, model, runtimeSpeed);
   }
 
   validatePreconditions(): string | null {
@@ -100,7 +105,11 @@ export class HybridPlannerClient {
           content:
             "You are a browser automation planner. Reply ONLY with strict JSON object. " +
             "Allowed actions: navigate, click, type, press, scroll, extract, wait, ask_user, finish. " +
-            "Prefer minimal safe next step. If task is done, return finish with answer.",
+            `Execution speed mode: ${this.runtimeSpeed}. ` +
+            (this.runtimeSpeed === "fast"
+              ? "Use fastest reliable steps; avoid waits unless the page is actively loading. "
+              : "Use human-like pacing and cautious waits when useful. ") +
+            "If task is done, return finish with answer.",
         },
         {
           role: "user",
@@ -139,7 +148,13 @@ export class HybridPlannerClient {
 
   private parsePlannerContent(raw: string): Record<string, unknown> {
     const trimmed = (raw || "").trim();
-    if (!trimmed) return { action: "wait", reason: "empty planner output", waitMs: 900 };
+    if (!trimmed) {
+      return {
+        action: "wait",
+        reason: "empty planner output",
+        waitMs: this.runtimeSpeed === "human" ? 1000 : 250,
+      };
+    }
 
     const deFenced = trimmed
       .replace(/^```json\s*/i, "")
@@ -150,7 +165,11 @@ export class HybridPlannerClient {
     try {
       return JSON.parse(deFenced) as Record<string, unknown>;
     } catch {
-      return { action: "wait", reason: "non-json planner output", waitMs: 900 };
+      return {
+        action: "wait",
+        reason: "non-json planner output",
+        waitMs: this.runtimeSpeed === "human" ? 1000 : 250,
+      };
     }
   }
 
@@ -176,7 +195,11 @@ export class HybridPlannerClient {
 
     const waitMs = Number(value.waitMs);
     if (Number.isFinite(waitMs)) {
-      safe.waitMs = Math.max(100, Math.min(10000, Math.trunc(waitMs)));
+      if (this.runtimeSpeed === "human") {
+        safe.waitMs = Math.max(100, Math.min(10000, Math.trunc(waitMs)));
+      } else {
+        safe.waitMs = Math.max(50, Math.min(2000, Math.trunc(waitMs)));
+      }
     }
 
     if (safe.action === "navigate" && !safe.url && safe.query) {

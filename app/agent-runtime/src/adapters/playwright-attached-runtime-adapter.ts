@@ -33,6 +33,23 @@ interface StepOutcome {
   data?: Record<string, unknown>;
 }
 
+interface SpeedProfile {
+  mode: "fast" | "human";
+  navigateTimeoutMs: number;
+  clickPrimaryTimeoutMs: number;
+  clickLoadWaitMs: number;
+  clickPostPauseMs: number;
+  clickForceTimeoutMs: number;
+  clickForcePauseMs: number;
+  scrollPauseMs: number;
+  waitMinMs: number;
+  waitMaxMs: number;
+  waitDefaultMs: number;
+  typeFillTimeoutMs: number;
+  typeClickTimeoutMs: number;
+  typeFillRetryTimeoutMs: number;
+}
+
 interface ThreadState {
   pinnedTab?: {
     index: number;
@@ -87,6 +104,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     }
 
     const cdpURL = this.cdpURL(request);
+    const speed = this.speedProfile(request);
     request.emit({
       eventName: "tool_call",
       threadId: request.threadId,
@@ -140,13 +158,13 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           evidence: `Navigating to ${initialURL}`,
           data: { action: "navigate", url: initialURL },
         });
-        await page.goto(initialURL, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.goto(initialURL, { waitUntil: "domcontentloaded", timeout: speed.navigateTimeoutMs });
       }
 
       const maxSteps = this.maxSteps(request);
       let startStep = continueRun ? Math.max(1, state.lastStep + 1) : 1;
       if (!continueRun) {
-        startStep = await this.replayPresetSteps(request, page, state, taskKey, startStep);
+        startStep = await this.replayPresetSteps(request, page, state, taskKey, startStep, speed);
       }
       const finalStep = startStep + maxSteps - 1;
 
@@ -179,7 +197,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
               step,
             },
           });
-          this.emitPlaywrightPreset(request, state, taskKey);
+          this.emitPlaywrightPreset(request, state, taskKey, speed);
           return {
             success: true,
             summary: `Paused for login at ${snapshot.url}`,
@@ -199,10 +217,10 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           eventName: "tool_call",
           threadId: request.threadId,
           toolName: "runtime.step",
-          content: `Step ${step}/${finalStep}: ${this.describeAction(action)}`,
+          content: `Step ${step}/${finalStep}: ${this.describeAction(action, speed.waitDefaultMs)}`,
         });
 
-        const outcome = await this.executeAction(page, action);
+        const outcome = await this.executeAction(page, action, speed);
         state.lastStep = step;
         state.history.push({
           step,
@@ -239,7 +257,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
               step,
             },
           });
-          this.emitPlaywrightPreset(request, state, taskKey);
+          this.emitPlaywrightPreset(request, state, taskKey, speed);
           return {
             success: true,
             summary: action.question || "Paused awaiting user input.",
@@ -248,7 +266,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
         }
 
         if (action.action === "finish") {
-          this.emitPlaywrightPreset(request, state, taskKey);
+          this.emitPlaywrightPreset(request, state, taskKey, speed);
           state.paused = undefined;
           state.history = [];
           state.lastStep = 0;
@@ -271,7 +289,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
         step: finalStep,
         question: "Reached max steps. Reply 'continue' to keep going or refine your instruction.",
       };
-      this.emitPlaywrightPreset(request, state, taskKey);
+      this.emitPlaywrightPreset(request, state, taskKey, speed);
       return {
         success: true,
         summary: `Reached max steps (${finalStep}). Reply 'continue' to proceed.`,
@@ -284,7 +302,11 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
         controlled: false,
         runtime: this.name,
       });
-      await browser.close();
+      if (typeof browser?.disconnect === "function") {
+        await browser.disconnect();
+      } else if (typeof browser?.close === "function") {
+        await browser.close();
+      }
     }
   }
 
@@ -323,6 +345,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     state: ThreadState,
     taskKey: string,
     startStep: number,
+    speed: SpeedProfile,
   ): Promise<number> {
     if (!taskKey || !state.presetTaskKey || !this.isTaskKeyReusable(taskKey, state.presetTaskKey)) {
       return startStep;
@@ -341,7 +364,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
 
     let step = startStep;
     for (const action of presetActions) {
-      const outcome = await this.executeAction(page, action);
+      const outcome = await this.executeAction(page, action, speed);
       state.lastStep = step;
       state.history.push({
         step,
@@ -385,6 +408,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     request: RuntimeExecutionRequest,
     state: ThreadState,
     taskKey: string,
+    speed: SpeedProfile,
   ): void {
     const successfulActions = state.history
       .filter((entry) => entry.success === true)
@@ -396,7 +420,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
       return;
     }
 
-    const code = this.buildPresetCode(request.message || "", successfulActions, state.history);
+    const code = this.buildPresetCode(request.message || "", successfulActions, state.history, speed);
     state.presetTaskKey = taskKey;
     state.presetActions = successfulActions.slice(0, 30);
     state.presetScript = code;
@@ -429,6 +453,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     task: string,
     actions: HybridPlannerAction[],
     history: Array<Record<string, unknown>>,
+    speed: SpeedProfile,
   ): string {
     const lines: string[] = [];
     lines.push(`// Auto-generated from attached runtime history`);
@@ -464,7 +489,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           lines.push(`  await page.mouse.wheel(0, ${Number(action.deltaY || 700)});`);
           break;
         case "wait":
-          lines.push(`  await page.waitForTimeout(${Number(action.waitMs || 1000)});`);
+          lines.push(`  await page.waitForTimeout(${Number(action.waitMs || speed.waitDefaultMs)});`);
           break;
         case "extract":
           lines.push(`  const extracted = await page.evaluate(() => document.body?.innerText || "");`);
@@ -491,7 +516,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     return lines.join("\n");
   }
 
-  private async executeAction(page: any, action: HybridPlannerAction): Promise<StepOutcome> {
+  private async executeAction(page: any, action: HybridPlannerAction, speed: SpeedProfile): Promise<StepOutcome> {
     try {
       switch (action.action) {
         case "navigate": {
@@ -499,7 +524,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           if (!target) {
             return { success: false, status: "failed", error: "navigate action missing url/query" };
           }
-          await page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await page.goto(target, { waitUntil: "domcontentloaded", timeout: speed.navigateTimeoutMs });
           return {
             success: true,
             status: "success",
@@ -512,7 +537,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           if (!selector) {
             return { success: false, status: "failed", error: "click action missing selector/elementId" };
           }
-          await this.tryClick(page, selector);
+          await this.tryClick(page, selector, speed);
           return {
             success: true,
             status: "success",
@@ -528,11 +553,11 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
           const text = action.text || "";
           const locator = page.locator(selector).first();
           try {
-            await locator.fill(text, { timeout: 3500 });
+            await locator.fill(text, { timeout: speed.typeFillTimeoutMs });
           } catch {
             try {
-              await locator.click({ timeout: 1500, force: true });
-              await locator.fill(text, { timeout: 2500 });
+              await locator.click({ timeout: speed.typeClickTimeoutMs, force: true });
+              await locator.fill(text, { timeout: speed.typeFillRetryTimeoutMs });
             } catch {
               await page.evaluate(
                 ({ sel, val }: { sel: string; val: string }) => {
@@ -572,7 +597,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
         case "scroll": {
           const deltaY = Number.isFinite(action.deltaY as number) ? Number(action.deltaY) : 700;
           await page.mouse.wheel(0, deltaY);
-          await page.waitForTimeout(300);
+          await page.waitForTimeout(speed.scrollPauseMs);
           return {
             success: true,
             status: "success",
@@ -592,8 +617,8 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
         }
         case "wait": {
           const waitMs = Number.isFinite(action.waitMs as number)
-            ? Math.max(100, Math.min(10000, Number(action.waitMs)))
-            : 1000;
+            ? Math.max(speed.waitMinMs, Math.min(speed.waitMaxMs, Number(action.waitMs)))
+            : speed.waitDefaultMs;
           await page.waitForTimeout(waitMs);
           return {
             success: true,
@@ -626,19 +651,18 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private async tryClick(page: any, selector: string): Promise<void> {
+  private async tryClick(page: any, selector: string, speed: SpeedProfile): Promise<void> {
     try {
-      await page.locator(selector).first().click({ timeout: 2500 });
+      await page.locator(selector).first().click({ timeout: speed.clickPrimaryTimeoutMs });
       await Promise.race([
-        page.waitForLoadState("domcontentloaded", { timeout: 1800 }).catch(() => undefined),
-        page.waitForTimeout(220),
+        page.waitForLoadState("domcontentloaded", { timeout: speed.clickLoadWaitMs }).catch(() => undefined),
+        page.waitForTimeout(speed.clickPostPauseMs),
       ]);
     } catch {
       // Overlay-heavy sites like Facebook often intercept pointer events.
       // Force click once before giving up to reduce latency on repeated retries.
-      await page.waitForTimeout(120);
-      await page.locator(selector).first().click({ timeout: 1500, force: true });
-      await page.waitForTimeout(180);
+      await page.locator(selector).first().click({ timeout: speed.clickForceTimeoutMs, force: true });
+      await page.waitForTimeout(speed.clickForcePauseMs);
     }
   }
 
@@ -709,7 +733,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     if (Number.isFinite(raw) && raw > 0) {
       return Math.max(1, Math.min(20, Math.trunc(raw)));
     }
-    return 8;
+    return 12;
   }
 
   private cdpURL(request: RuntimeExecutionRequest): string {
@@ -947,7 +971,7 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
     return ratio >= 0.6;
   }
 
-  private describeAction(action: HybridPlannerAction): string {
+  private describeAction(action: HybridPlannerAction, defaultWaitMs: number): string {
     switch (action.action) {
       case "navigate":
         return `navigate to ${action.url || action.query || "target"}`;
@@ -962,12 +986,59 @@ export class PlaywrightAttachedRuntimeAdapter implements RuntimeAdapter {
       case "extract":
         return "extract page content";
       case "wait":
-        return `wait ${action.waitMs || 1000}ms`;
+        return `wait ${action.waitMs || defaultWaitMs}ms`;
       case "ask_user":
         return "ask user for context";
       case "finish":
         return "finish task";
     }
+  }
+
+  private runtimeSpeed(request: RuntimeExecutionRequest): "fast" | "human" {
+    const fromRequest = String(request.options.runtimeSpeed || "").trim().toLowerCase();
+    if (fromRequest === "human") return "human";
+    if (fromRequest === "fast") return "fast";
+    const fromEnv = String(process.env.ANORHA_RUNTIME_SPEED || "").trim().toLowerCase();
+    if (fromEnv === "human") return "human";
+    return "fast";
+  }
+
+  private speedProfile(request: RuntimeExecutionRequest): SpeedProfile {
+    const mode = this.runtimeSpeed(request);
+    if (mode === "human") {
+      return {
+        mode,
+        navigateTimeoutMs: 30000,
+        clickPrimaryTimeoutMs: 2500,
+        clickLoadWaitMs: 1800,
+        clickPostPauseMs: 220,
+        clickForceTimeoutMs: 1500,
+        clickForcePauseMs: 180,
+        scrollPauseMs: 300,
+        waitMinMs: 100,
+        waitMaxMs: 10000,
+        waitDefaultMs: 1000,
+        typeFillTimeoutMs: 3500,
+        typeClickTimeoutMs: 1500,
+        typeFillRetryTimeoutMs: 2500,
+      };
+    }
+    return {
+      mode,
+      navigateTimeoutMs: 18000,
+      clickPrimaryTimeoutMs: 1400,
+      clickLoadWaitMs: 900,
+      clickPostPauseMs: 60,
+      clickForceTimeoutMs: 900,
+      clickForcePauseMs: 50,
+      scrollPauseMs: 120,
+      waitMinMs: 50,
+      waitMaxMs: 2000,
+      waitDefaultMs: 250,
+      typeFillTimeoutMs: 2200,
+      typeClickTimeoutMs: 900,
+      typeFillRetryTimeoutMs: 1600,
+    };
   }
 
   private async injectControlBorder(page: any): Promise<void> {

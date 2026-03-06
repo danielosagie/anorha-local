@@ -1364,6 +1364,7 @@ func (s *Server) chatWithBrowserRuntime(ctx context.Context, w http.ResponseWrit
 		Headless:              false,
 		WebToolsEnabled:       req.WebSearch != nil && *req.WebSearch,
 		RuntimeBackend:        backend,
+		RuntimeSpeed:          strings.TrimSpace(req.RuntimeSpeed),
 		RuntimeCDPURL:         strings.TrimSpace(req.RuntimeCDPURL),
 		RuntimeTabMatch:       strings.TrimSpace(req.RuntimeTabMatch),
 		RuntimeTabPolicy:      strings.TrimSpace(req.RuntimeTabPolicy),

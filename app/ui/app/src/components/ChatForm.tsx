@@ -67,6 +67,7 @@ interface ChatFormProps {
       runtimeOptions?: {
         browserControlEnabled?: boolean;
         runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeSpeed?: "fast" | "human";
         runtimeCDPURL?: string;
         runtimeTabIndex?: number;
         runtimeTabMatch?: string;
@@ -108,12 +109,13 @@ function ChatForm({
   onFilesReceived,
 }: ChatFormProps) {
   const defaultRuntimeConfig: BrowserRuntimeConfig = {
-    runtimeBackend: "playwright_attached",
+    runtimeBackend: "browser_use_ts",
+    runtimeSpeed: "fast",
     runtimeCDPURL: "http://127.0.0.1:9222",
     runtimeTabPolicy: "pinned",
     runtimeTabIndex: undefined,
     runtimeTabMatch: "",
-    runtimeMaxSteps: 8,
+    runtimeMaxSteps: 12,
   };
   const [message, setMessage] = useState<MessageInput>({
     content: "",
@@ -546,6 +548,7 @@ function ChatForm({
         runtimeOptions: {
           browserControlEnabled,
           runtimeBackend: runtimeConfig.runtimeBackend,
+          runtimeSpeed: runtimeConfig.runtimeSpeed,
           runtimeCDPURL: runtimeConfig.runtimeCDPURL,
           runtimeTabIndex: runtimeConfig.runtimeTabIndex,
           runtimeTabMatch: runtimeConfig.runtimeTabMatch || undefined,
@@ -564,6 +567,7 @@ function ChatForm({
         runtimeOptions: {
           browserControlEnabled,
           runtimeBackend: runtimeConfig.runtimeBackend,
+          runtimeSpeed: runtimeConfig.runtimeSpeed,
           runtimeCDPURL: runtimeConfig.runtimeCDPURL,
           runtimeTabIndex: runtimeConfig.runtimeTabIndex,
           runtimeTabMatch: runtimeConfig.runtimeTabMatch || undefined,

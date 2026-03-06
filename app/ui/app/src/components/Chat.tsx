@@ -136,6 +136,7 @@ export default function Chat({ chatId }: { chatId: string }) {
       runtimeOptions?: {
         browserControlEnabled?: boolean;
         runtimeBackend?: "browser_use_ts" | "playwright_direct" | "playwright_attached";
+        runtimeSpeed?: "fast" | "human";
         runtimeCDPURL?: string;
         runtimeTabIndex?: number;
         runtimeTabMatch?: string;

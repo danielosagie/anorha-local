@@ -7,6 +7,7 @@ export type RuntimeBackendOption =
 
 export interface BrowserRuntimeConfig {
   runtimeBackend: RuntimeBackendOption;
+  runtimeSpeed: "fast" | "human";
   runtimeCDPURL: string;
   runtimeTabPolicy: "pinned" | "ask" | "active";
   runtimeTabIndex?: number;
@@ -27,12 +28,14 @@ export const BrowserControlButton = forwardRef<HTMLButtonElement, ButtonProps>(
 
     const runtimeLabel = useMemo(() => {
       switch (config.runtimeBackend) {
+        case "browser_use_ts":
+          return "Browser Use";
         case "playwright_attached":
-          return "Attached";
+          return "Attached Hybrid";
         case "playwright_direct":
-          return "Direct";
+          return "Playwright Direct";
         default:
-          return "Browser-Use";
+          return "Browser Use";
       }
     }, [config.runtimeBackend]);
 
@@ -93,9 +96,21 @@ export const BrowserControlButton = forwardRef<HTMLButtonElement, ButtonProps>(
                 onConfigChange({ runtimeBackend: e.target.value as RuntimeBackendOption })
               }
             >
-              <option value="playwright_attached">Attached Hybrid</option>
               <option value="browser_use_ts">Browser-Use</option>
+              <option value="playwright_attached">Attached Hybrid</option>
               <option value="playwright_direct">Playwright Direct</option>
+            </select>
+
+            <label className="block text-[11px] text-neutral-500 mb-1">Speed</label>
+            <select
+              className="w-full mb-2 h-8 rounded-md border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-900 px-2 text-xs"
+              value={config.runtimeSpeed}
+              onChange={(e) =>
+                onConfigChange({ runtimeSpeed: e.target.value as "fast" | "human" })
+              }
+            >
+              <option value="fast">Fast</option>
+              <option value="human">Human-like</option>
             </select>
 
             <label className="block text-[11px] text-neutral-500 mb-1">CDP URL</label>

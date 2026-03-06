@@ -30,6 +30,8 @@ type RuntimeOptions struct {
 	Headless              bool           `json:"headless"`
 	WebToolsEnabled       bool           `json:"webToolsEnabled"`
 	RuntimeBackend        RuntimeBackend `json:"runtimeBackend"`
+	AllowAttachedFallback bool           `json:"allowAttachedFallback,omitempty"`
+	RuntimeSpeed          string         `json:"runtimeSpeed,omitempty"`
 	RuntimeCDPURL         string         `json:"runtimeCDPURL,omitempty"`
 	RuntimeTabIndex       int            `json:"runtimeTabIndex,omitempty"`
 	RuntimeTabMatch       string         `json:"runtimeTabMatch,omitempty"`

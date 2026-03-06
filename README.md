@@ -43,6 +43,75 @@ The official [Ollama Docker image](https://hub.docker.com/r/ollama/ollama) `olla
 - [ollama-python](https://github.com/ollama/ollama-python)
 - [ollama-js](https://github.com/ollama/ollama-js)
 
+## `anorha-local` Browser-Use
+
+`anorha-local` includes a Browser-Use runtime path that follows the Ollama model you selected in the app at runtime. It is not locked to one model name.
+
+### Use the app from source in one command
+
+From the repository root:
+
+macOS:
+
+```bash
+./scripts/run-anorha-local.sh --fast-startup
+```
+
+Windows:
+
+```powershell
+bash ./scripts/run-anorha-local.sh --fast-startup
+```
+
+Notes:
+- The launcher resolves the repo root from the script path, so you can run it from any working directory.
+- On Windows, the local-start command assumes `bash` is available in `PATH` (Git Bash, MSYS2, or WSL bash shim).
+- `browser_use_ts` is the default browser-control backend.
+- `local_ollama` uses the selected Ollama model as the Browser-Use planner model through the OpenAI-compatible Ollama endpoint by default.
+
+To force a specific local Ollama model for Browser-Use:
+
+macOS:
+
+```bash
+OLLAMA_MODEL=qwen3.5:0.8b \
+BROWSER_USE_FORCE_MODEL=qwen3.5:0.8b \
+BROWSER_USE_MODE=mcp \
+BROWSER_USE_LLM_TRANSPORT=openai_compat \
+./scripts/run-anorha-local.sh --fast-startup
+```
+
+Windows:
+
+```powershell
+$env:OLLAMA_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_FORCE_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_MODE="mcp"; $env:BROWSER_USE_LLM_TRANSPORT="openai_compat"; bash ./scripts/run-anorha-local.sh --fast-startup
+```
+
+### Build the desktop apps in one command
+
+macOS app build:
+
+```bash
+./scripts/build_darwin.sh app
+```
+
+Windows app build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 app
+```
+
+Build behavior:
+- The build scripts resolve the repo root from the script path, so they can be launched from any working directory.
+- The macOS build now prepares bundled Browser-Use runtime assets and bundled Chromium before copying them into `Ollama.app`.
+- The Windows build now prepares bundled Browser-Use runtime assets and bundled Chromium before copying them into the installer payload.
+- Packaged app resources include `agent-runtime`, `node` / `node.exe`, `browser-use-runtime`, and `browser-use-browsers`.
+
+Browser-Use runtime notes:
+- `BROWSER_USE_LLM_TRANSPORT=openai_compat` is the supported default for `local_ollama`.
+- The selected Ollama model remains the Browser-Use planner model source of truth.
+- Planner/model/auth failures are expected to fail fast instead of silently opening blank tabs and idling.
+
 ### Community
 
 - [Discord](https://discord.gg/ollama)

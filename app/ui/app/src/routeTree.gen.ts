@@ -13,6 +13,7 @@
 import { Route as rootRoute } from './routes/__root'
 import { Route as WorkflowsImport } from './routes/workflows'
 import { Route as SettingsImport } from './routes/settings'
+import { Route as LoginImport } from './routes/login'
 import { Route as IndexImport } from './routes/index'
 import { Route as CChatIdImport } from './routes/c.$chatId'
 
@@ -27,6 +28,12 @@ const WorkflowsRoute = WorkflowsImport.update({
 const SettingsRoute = SettingsImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRoute,
+} as any)
+
+const LoginRoute = LoginImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRoute,
 } as any)
 
@@ -51,6 +58,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexImport
+      parentRoute: typeof rootRoute
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginImport
       parentRoute: typeof rootRoute
     }
     '/settings': {
@@ -81,6 +95,7 @@ declare module '@tanstack/react-router' {
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
   '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
@@ -88,6 +103,7 @@ export interface FileRoutesByFullPath {
 
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
   '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
@@ -96,6 +112,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRoute
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
   '/workflows': typeof WorkflowsRoute
   '/c/$chatId': typeof CChatIdRoute
@@ -103,15 +120,16 @@ export interface FileRoutesById {
 
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/settings' | '/workflows' | '/c/$chatId'
+  fullPaths: '/' | '/login' | '/settings' | '/workflows' | '/c/$chatId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/settings' | '/workflows' | '/c/$chatId'
-  id: '__root__' | '/' | '/settings' | '/workflows' | '/c/$chatId'
+  to: '/' | '/login' | '/settings' | '/workflows' | '/c/$chatId'
+  id: '__root__' | '/' | '/login' | '/settings' | '/workflows' | '/c/$chatId'
   fileRoutesById: FileRoutesById
 }
 
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LoginRoute: typeof LoginRoute
   SettingsRoute: typeof SettingsRoute
   WorkflowsRoute: typeof WorkflowsRoute
   CChatIdRoute: typeof CChatIdRoute
@@ -119,6 +137,7 @@ export interface RootRouteChildren {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LoginRoute: LoginRoute,
   SettingsRoute: SettingsRoute,
   WorkflowsRoute: WorkflowsRoute,
   CChatIdRoute: CChatIdRoute,
@@ -135,6 +154,7 @@ export const routeTree = rootRoute
       "filePath": "__root.tsx",
       "children": [
         "/",
+        "/login",
         "/settings",
         "/workflows",
         "/c/$chatId"
@@ -142,6 +162,9 @@ export const routeTree = rootRoute
     },
     "/": {
       "filePath": "index.tsx"
+    },
+    "/login": {
+      "filePath": "login.tsx"
     },
     "/settings": {
       "filePath": "settings.tsx"

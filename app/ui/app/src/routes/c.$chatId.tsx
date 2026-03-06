@@ -1,11 +1,17 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useChat } from "@/hooks/useChats";
 import Chat from "@/components/Chat";
 import { getChat } from "@/api";
 import { SidebarLayout } from "@/components/layout/layout";
 import { ChatSidebar } from "@/components/ChatSidebar";
+import { isAppAuthEnabled, isAppSignedIn } from "@/lib/appAuth";
 
 export const Route = createFileRoute("/c/$chatId")({
+  beforeLoad: () => {
+    if (isAppAuthEnabled() && !isAppSignedIn()) {
+      throw redirect({ to: "/login" });
+    }
+  },
   component: RouteComponent,
   loader: async ({ context, params }) => {
     // Skip loading for "new" chat

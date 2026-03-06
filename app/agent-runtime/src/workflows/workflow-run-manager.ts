@@ -550,6 +550,7 @@ export class WorkflowRunManager {
       browserControlEnabled: true,
       headless: override.headless ?? DEFAULT_OPTIONS.headless,
       runtimeBackend: override.runtimeBackend || DEFAULT_OPTIONS.runtimeBackend,
+      runtimeSpeed: override.runtimeSpeed || DEFAULT_OPTIONS.runtimeSpeed,
       runtimeCDPURL: override.runtimeCDPURL || DEFAULT_OPTIONS.runtimeCDPURL,
       runtimeTabIndex: override.runtimeTabIndex,
       runtimeTabMatch: override.runtimeTabMatch,
