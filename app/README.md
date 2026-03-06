@@ -32,6 +32,16 @@ Examples:
 ./scripts/run-anorha-local.sh --dev --app-port 3002 --vite-port 5174 --runtime-port 7320
 ```
 
+Windows PowerShell examples:
+
+```powershell
+# Normal desktop app
+.\scripts\run-anorha-local.ps1
+
+# Dev mode with custom ports
+.\scripts\run-anorha-local.ps1 --dev --app-port 3002 --vite-port 5174 --runtime-port 7320
+```
+
 ### Browser-Use Runtime Visibility
 
 When browser control is enabled, runtime telemetry is streamed back into chat as tool events:

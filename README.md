@@ -60,12 +60,12 @@ macOS:
 Windows:
 
 ```powershell
-bash ./scripts/run-anorha-local.sh --fast-startup
+.\scripts\run-anorha-local.ps1 --fast-startup
 ```
 
 Notes:
 - The launcher resolves the repo root from the script path, so you can run it from any working directory.
-- On Windows, the local-start command assumes `bash` is available in `PATH` (Git Bash, MSYS2, or WSL bash shim).
+- On Windows, use the native PowerShell launcher instead of Git Bash.
 - `browser_use_ts` is the default browser-control backend.
 - `local_ollama` uses the selected Ollama model as the Browser-Use planner model through the OpenAI-compatible Ollama endpoint by default.
 
@@ -84,7 +84,7 @@ BROWSER_USE_LLM_TRANSPORT=openai_compat \
 Windows:
 
 ```powershell
-$env:OLLAMA_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_FORCE_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_MODE="mcp"; $env:BROWSER_USE_LLM_TRANSPORT="openai_compat"; bash ./scripts/run-anorha-local.sh --fast-startup
+$env:OLLAMA_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_FORCE_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_MODE="mcp"; $env:BROWSER_USE_LLM_TRANSPORT="openai_compat"; .\scripts\run-anorha-local.ps1 --fast-startup
 ```
 
 ### Build the desktop apps in one command
