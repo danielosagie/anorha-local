@@ -57,15 +57,16 @@ macOS:
 ./scripts/run-anorha-local.sh --fast-startup
 ```
 
-Windows:
+Windows (Command Prompt or PowerShell):
 
-```powershell
-.\scripts\run-anorha-local.ps1 --fast-startup
+```bat
+.\scripts\run-anorha-local.cmd --fast-startup
 ```
 
 Notes:
 - The launcher resolves the repo root from the script path, so you can run it from any working directory.
-- On Windows, use the native PowerShell launcher instead of Git Bash.
+- On Windows, `run-anorha-local.cmd` launches `run-anorha-local.sh` through Git Bash if Git for Windows is installed.
+- If you want the direct PowerShell path instead, run `powershell -ExecutionPolicy Bypass -File .\scripts\run-anorha-local.ps1 --fast-startup`.
 - `browser_use_ts` is the default browser-control backend.
 - `local_ollama` uses the selected Ollama model as the Browser-Use planner model through the OpenAI-compatible Ollama endpoint by default.
 
@@ -84,7 +85,7 @@ BROWSER_USE_LLM_TRANSPORT=openai_compat \
 Windows:
 
 ```powershell
-$env:OLLAMA_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_FORCE_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_MODE="mcp"; $env:BROWSER_USE_LLM_TRANSPORT="openai_compat"; .\scripts\run-anorha-local.ps1 --fast-startup
+$env:OLLAMA_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_FORCE_MODEL="qwen3.5:0.8b"; $env:BROWSER_USE_MODE="mcp"; $env:BROWSER_USE_LLM_TRANSPORT="openai_compat"; .\scripts\run-anorha-local.cmd --fast-startup
 ```
 
 ### Build the desktop apps in one command
@@ -97,8 +98,8 @@ macOS app build:
 
 Windows app build:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 app
+```bat
+.\scripts\build_windows.cmd app
 ```
 
 Build behavior:
@@ -106,6 +107,7 @@ Build behavior:
 - The macOS build now prepares bundled Browser-Use runtime assets and bundled Chromium before copying them into `Ollama.app`.
 - The Windows build now prepares bundled Browser-Use runtime assets and bundled Chromium before copying them into the installer payload.
 - Packaged app resources include `agent-runtime`, `node` / `node.exe`, `browser-use-runtime`, and `browser-use-browsers`.
+- `build_windows.cmd` is the simplest Windows entrypoint and delegates to the existing PowerShell build script.
 
 Browser-Use runtime notes:
 - `BROWSER_USE_LLM_TRANSPORT=openai_compat` is the supported default for `local_ollama`.

@@ -32,13 +32,19 @@ Examples:
 ./scripts/run-anorha-local.sh --dev --app-port 3002 --vite-port 5174 --runtime-port 7320
 ```
 
-Windows PowerShell examples:
+Windows examples:
+
+```bat
+REM Normal desktop app via bash-friendly wrapper
+.\scripts\run-anorha-local.cmd
+
+REM Dev mode with custom ports
+.\scripts\run-anorha-local.cmd --dev --app-port 3002 --vite-port 5174 --runtime-port 7320
+```
+
+PowerShell still works directly:
 
 ```powershell
-# Normal desktop app
-.\scripts\run-anorha-local.ps1
-
-# Dev mode with custom ports
 .\scripts\run-anorha-local.ps1 --dev --app-port 3002 --vite-port 5174 --runtime-port 7320
 ```
 
@@ -285,8 +291,8 @@ Output artifacts are written under `dist/`.
 ```
 
 **Build**
-```powershell
-.\scripts\build_windows.ps1
+```bat
+.\scripts\build_windows.cmd
 ```
 
 Installer notes:
